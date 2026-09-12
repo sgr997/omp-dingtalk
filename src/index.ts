@@ -42,7 +42,7 @@ import { createLogger, type Logger } from "./logger";
 import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
 import { ApprovalRegistry, CommandRouter, type ApiLike, type CtxLike } from "./router";
 import { DingTalkStream, type StreamStatus } from "./stream";
-import { extractText, extractToolNames, safeJson, truncate } from "./util";
+import { extractText, extractToolNames, safeJson, truncate, truncatePath } from "./util";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
@@ -255,7 +255,7 @@ class Bridge {
 		const lockLine = this.takenOver
 			? "- **接管锁**: 本会话持有"
 			: owner
-				? `- **接管锁**: 被其他会话占用（\`${truncate(owner.cwd || "?", 80)}\` · PID ${owner.pid}）`
+				? `- **接管锁**: 被其他会话占用（\`${truncatePath(owner.cwd || "?", 80)}\` · PID ${owner.pid}）`
 				: "- **接管锁**: 空闲";
 
 		return [
@@ -347,9 +347,9 @@ class Bridge {
 			fmtText(
 				"⚠️ 钉钉接管已被抢占",
 				[
-					`另一个会话（目录 \`${truncate(preemptedBy.cwd, 120)}\`，PID ${preemptedBy.pid}）接管了同一个钉钉应用。`,
+					`另一个会话（目录 \`${truncatePath(preemptedBy.cwd, 120)}\`，PID ${preemptedBy.pid}）接管了同一个钉钉应用。`,
 					``,
-					`本会话（\`${truncate(victim, 120)}\`）已自动释放，**钉钉里的消息不会再到达这里**。`,
+					`本会话（\`${truncatePath(victim, 120)}\`）已自动释放，**钉钉里的消息不会再到达这里**。`,
 					``,
 					`想抢回来就在这个会话里重新执行 \`/dingtalk takeover\`。`,
 				].join("\n"),
@@ -682,7 +682,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				await withTimeout(
 					b.sender.send({
 						title: "omp 已退出",
-						text: `🔌 omp 已退出\n\n目录 \`${truncate(b.cwd, 120)}\``,
+						text: `🔌 omp 已退出\n\n目录 \`${truncatePath(b.cwd, 120)}\``,
 						priority: "high",
 					}),
 					SHUTDOWN_SEND_TIMEOUT_MS,
@@ -865,7 +865,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
 						: "";
 					const stolen = result.preempted
-						? ` 已从另一个会话手里抢占（\`${truncate(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}），它会在 ${Math.round(heartbeatMs() / 1000)} 秒内自动释放。`
+						? ` 已从另一个会话手里抢占（\`${truncatePath(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}），它会在 ${Math.round(heartbeatMs() / 1000)} 秒内自动释放。`
 						: "";
 					ctx.ui?.notify?.(
 						result.ok
@@ -893,7 +893,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					}
 					const result = await b.sender.send({
 						title: "omp 测试消息",
-						text: `## 👋 测试消息\n\n来自 \`${truncate(b.cwd, 120)}\`\n\n如果你看到这条消息，出站通道是通的。`,
+						text: `## 👋 测试消息\n\n来自 \`${truncatePath(b.cwd, 120)}\`\n\n如果你看到这条消息，出站通道是通的。`,
 						priority: "high",
 					});
 					ctx.ui?.notify?.(result.ok ? "已发送测试消息，请查看钉钉。" : `发送失败：${result.errmsg ?? "未知错误"}`, result.ok ? "info" : "error");
@@ -966,7 +966,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				}
 				const result = await b.sender.send({
 					title: truncate(params?.title ?? "omp 通知", 60),
-					text: `${String(params?.message ?? "")}\n\n---\n<font color="#999999" size="1">来自 omp · ${truncate(b.cwd, 80)}</font>`,
+					text: `${String(params?.message ?? "")}\n\n---\n<font color="#999999" size="1">来自 omp · ${truncatePath(b.cwd, 80)}</font>`,
 					priority: params?.urgency ?? "normal",
 				});
 				return {
