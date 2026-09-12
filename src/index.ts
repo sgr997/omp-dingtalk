@@ -1,0 +1,984 @@
+/**
+ * omp-dingtalk — extension entrypoint.
+ *
+ * Bridges a running OMP session to DingTalk in both directions:
+ *
+ *   out  session/turn/approval/error events  → DingTalk markdown notifications
+ *   in   DingTalk text commands and prompts  → the live session
+ *
+ * Load it by linking the package and letting the plugin manifest pick it up:
+ *   omp plugin link <path-to-this-repo>
+ *
+ * Design notes worth keeping in mind when editing:
+ *  - Handlers must never throw: an unhandled rejection from a handler or a
+ *    detached timer tears down the whole session. Every entry point is wrapped.
+ *  - Registration (`pi.on` / `pi.registerTool` / `pi.registerCommand`) is only
+ *    valid during the load phase, so everything is registered unconditionally
+ *    and the runtime work happens inside the handlers.
+ *  - The remote approval gate is fail-closed but *inert when unreachable*: with
+ *    no webhook configured there is no way to ask, so blocking would just stall
+ *    the agent until the timeout. In that case the gate stands down and warns.
+ *    The same applies when DingTalk has not taken over — nobody could answer.
+ *  - Inbound control is opt-in. The Stream channel only opens after an explicit
+ *    `/dingtalk takeover` (or `control.autoTakeover: true`), so DingTalk can
+ *    never drive a session you are sitting in front of by accident.
+ */
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
+import { DingTalkSender } from "./dingtalk";
+import {
+	fmtApprovalRequest,
+	fmtError,
+	fmtHelp,
+	fmtSessionStart,
+	fmtSessionStop,
+	fmtText,
+	fmtToolUse,
+	fmtTurnEnd,
+	setSessionTag,
+	type Message,
+} from "./format";
+import { createLogger, type Logger } from "./logger";
+import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
+import { ApprovalRegistry, CommandRouter, type ApiLike, type CtxLike } from "./router";
+import { DingTalkStream, type StreamStatus } from "./stream";
+import { extractText, extractToolNames, safeJson, truncate } from "./util";
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
+
+/** Custom session-entry namespace used to persist the mute flag across resumes. */
+const STATE_ENTRY = "com.omp-dingtalk.state";
+/**
+ * Hard cap on the shutdown notification send.
+ *
+ * OMP aborts an event handler that runs longer than **2000 ms** ("handler timed
+ * out after 2000ms"), so this must stay comfortably under that. The goal is to
+ * give the message a chance to leave the machine, not to guarantee delivery —
+ * a slow network or a backed-up rate-limit queue will still drop it.
+ */
+const SHUTDOWN_SEND_TIMEOUT_MS = 1_500;
+
+interface NotifyOptions {
+	priority?: "high" | "normal" | "low";
+	dedupeKey?: string;
+	/** Approvals and errors go out even while muted. */
+	bypassQuiet?: boolean;
+	/**
+	 * Send even when `notify.onlyWhenTakenOver` would suppress it.
+	 *
+	 * Reserved for one case: telling you that a takeover you were actively using
+	 * has just been stolen by another session. Staying silent there would leave
+	 * you believing DingTalk still drives this session.
+	 */
+	bypassTakeover?: boolean;
+}
+
+/**
+ * Owns one cwd's worth of bridge state. Recreated when the working directory
+ * changes so project-level config overrides are picked up.
+ */
+class Bridge {
+	cfg: DingTalkConfig;
+	loaded: LoadedConfig;
+	readonly log: Logger;
+	sender: DingTalkSender;
+	readonly approvals: ApprovalRegistry;
+	router: CommandRouter;
+
+	quiet: boolean;
+	/**
+	 * Whether DingTalk is currently allowed to drive this session.
+	 *
+	 * Starts `false` unless `control.autoTakeover` is set: the inbound channel
+	 * stays closed until someone sitting at the terminal asks for it with
+	 * `/dingtalk takeover`. Being connected is a deliberate state, not a default.
+	 */
+	takenOver = false;
+	sessionStartedAt = Date.now();
+	turnCount = 0;
+	turnStartedAt = new Map<number, number>();
+	ctx: CtxLike | undefined;
+	stream: DingTalkStream | undefined;
+	streamStatus: StreamStatus = { state: "idle", reconnects: 0 };
+	/**
+	 * Cross-process claim on the DingTalk Stream for this app credential.
+	 *
+	 * `takenOver` alone only stops *this* process from fighting itself; it says
+	 * nothing about the other omp sessions sharing the same app. The lock is what
+	 * makes "one live consumer per app credential" true across processes.
+	 */
+	lock: TakeoverLock | undefined;
+
+	#pi: ApiLike;
+	#lastAssistantText = "";
+	#lockClientId = "";
+	#lockTimer: ReturnType<typeof setInterval> | undefined;
+
+	constructor(pi: ApiLike, readonly cwd: string) {
+		this.#pi = pi;
+		this.loaded = loadConfig(cwd);
+		this.cfg = this.loaded.config;
+		this.quiet = this.cfg.quiet;
+		this.log = createLogger((pi as unknown as { logger?: unknown }).logger);
+		// `approvals` outlives config reloads so in-flight requests are not lost.
+		this.approvals = new ApprovalRegistry(this.log);
+		this.sender = new DingTalkSender(this.cfg, this.log);
+		this.router = this.#buildRouter();
+	}
+
+	#buildRouter(): CommandRouter {
+		return new CommandRouter({
+			cfg: this.cfg,
+			log: this.log,
+			sender: this.sender,
+			approvals: this.approvals,
+			pi: this.#pi,
+			getCtx: () => this.ctx,
+			statusLines: () => this.statusLines(),
+			isQuiet: () => this.quiet,
+			setQuiet: (value) => this.setQuiet(value),
+			onAuthorizedSender: (senderId) => {
+				this.sender.rememberUser(senderId);
+			},
+		});
+	}
+
+	/**
+	 * Re-read the config files. Editing `dingtalk.json` and starting a new
+	 * session picks the change up without restarting omp; the Stream connection
+	 * is only torn down when its own credentials changed.
+	 */
+	refreshConfig(): boolean {
+		const next = loadConfig(this.cwd);
+		if (JSON.stringify(next.config) === JSON.stringify(this.cfg)) return false;
+
+		const streamChanged = JSON.stringify(next.config.stream) !== JSON.stringify(this.cfg.stream);
+		if (this.cfg.quiet !== next.config.quiet) this.quiet = next.config.quiet;
+
+		this.loaded = next;
+		this.cfg = next.config;
+		// Reuse the sender: a new instance would reset the rate-limit window and
+		// race the old one's backlog, so messages could arrive out of order.
+		this.sender.updateConfig(next.config);
+		this.router = this.#buildRouter();
+
+		if (streamChanged) {
+			this.stream?.stop();
+			this.stream = undefined;
+			// Reconnect with the new credentials only if control was already handed
+			// over — a config edit must not silently take over the session.
+			this.startStream();
+		}
+		this.log.info("钉钉配置已重新加载");
+		return true;
+	}
+
+	/** Warnings produced while loading config — surfaced once per session. */
+	get warnings(): string[] {
+		return this.loaded.warnings;
+	}
+
+	/** Push a notification, honouring mute and the master switch. */
+	notify(message: Message, options: NotifyOptions = {}): void {
+		if (!this.cfg.enabled) return;
+		// "Silent until takeover" outranks `bypassQuiet`: it is an explicit
+		// choice to have DingTalk say nothing until control was handed over, and
+		// approvals cannot happen in that state anyway (the gate stands down).
+		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver && !options.bypassTakeover) {
+			this.log.debug("配置为接管前静默，跳过通知", { title: message.title });
+			return;
+		}
+		if (this.quiet && !options.bypassQuiet) return;
+		if (!this.sender.configured) {
+			this.log.debug("没有可用的出站通道，跳过通知", { title: message.title });
+			return;
+		}
+		this.sender.enqueue({
+			title: message.title,
+			text: truncate(message.text, this.cfg.notify.maxTextChars),
+			priority: options.priority ?? "normal",
+			dedupeKey: options.dedupeKey,
+		});
+	}
+
+	/** Whether an outbound push is allowed right now (takeover gate + config). */
+	get canPush(): boolean {
+		if (!this.cfg.enabled) return false;
+		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) return false;
+		return this.sender.configured;
+	}
+
+	/** Why `canPush` is false, for the model-facing tool to relay. */
+	get pushBlockedReason(): string | undefined {
+		if (!this.cfg.enabled) return "插件被 `enabled: false` 关闭了。";
+		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) {
+			return "配置为「接管前静默」（notify.onlyWhenTakenOver），需要先在 omp 里执行 `/dingtalk takeover`。";
+		}
+		if (!this.sender.configured) {
+			return `当前没有可用的出站通道（outbound.mode = ${this.cfg.outbound.mode}）。`;
+		}
+		return undefined;
+	}
+
+	setQuiet(value: boolean): void {
+		this.quiet = value;
+		try {
+			this.#pi.appendEntry?.(STATE_ENTRY, { quiet: value });
+		} catch (error) {
+			this.log.debug("持久化静音状态失败", error);
+		}
+	}
+
+	/** Restore the persisted mute flag for the session being resumed. */
+	restoreState(ctx: CtxLike & { sessionManager?: { getBranch?: () => unknown[] } }): void {
+		try {
+			const branch = ctx.sessionManager?.getBranch?.() ?? [];
+			for (const entry of branch as Array<{ type?: string; customType?: string; data?: { quiet?: boolean } }>) {
+				if (entry?.type === "custom" && entry.customType === STATE_ENTRY && typeof entry.data?.quiet === "boolean") {
+					this.quiet = entry.data.quiet;
+				}
+			}
+		} catch (error) {
+			this.log.debug("恢复静音状态失败", error);
+		}
+	}
+
+	statusLines(): string[] {
+		const stats = this.sender.stats;
+		const pending = this.approvals.size;
+		const inbound = !this.takenOver
+			? "未接管 · 在 omp 里执行 `/dingtalk takeover` 后钉钉才能指挥本会话"
+			: this.streamStatus.state === "registered"
+				? "已接管（已连接）"
+				: `已接管（${this.streamStatus.state}${this.streamStatus.detail ? `: ${this.streamStatus.detail}` : ""}）`;
+		const owner = this.lock?.readOwner();
+		const lockLine = this.takenOver
+			? "- **接管锁**: 本会话持有"
+			: owner
+				? `- **接管锁**: 被其他会话占用（\`${truncate(owner.cwd || "?", 80)}\` · PID ${owner.pid}）`
+				: "- **接管锁**: 空闲";
+
+		return [
+			`- **出站通道**: ${OUTBOUND_MODE_LABELS[this.cfg.outbound.mode] ?? this.cfg.outbound.mode}${this.sender.configured ? "" : "（当前不可用）"}`,
+			`- **单聊收件人**: ${this.sender.recipientCount} 人`,
+			`- **通知队列**: ${stats.queued} 待发 / 已发 ${stats.delivered} / 丢弃 ${stats.dropped} / 失败 ${stats.failed}`,
+			`- **钉钉接管**: ${inbound}`,
+			lockLine,
+			`- **入站通道**: ${this.streamStatus.state}${this.streamStatus.detail ? ` (${this.streamStatus.detail})` : ""} · 重连 ${this.streamStatus.reconnects} 次`,
+			`- **待审批**: ${pending}`,
+			`- **配置来源**: ${this.loaded.sources.join(" | ") || "(默认值)"}`,
+		];
+	}
+
+	/** Open the inbound channel. Idempotent — safe to call on every takeover. */
+	startStream(): void {
+		if (!this.cfg.enabled || !this.cfg.stream.enabled || this.stream) return;
+		if (!this.takenOver) {
+			this.log.debug("尚未接管，跳过 Stream 建连");
+			return;
+		}
+		this.stream = new DingTalkStream({
+			clientId: this.cfg.stream.clientId,
+			clientSecret: this.cfg.stream.clientSecret,
+			logger: this.log,
+			onMessage: (message) => this.router.handle(message),
+			onStatus: (status) => {
+				this.streamStatus = status;
+			},
+		});
+		this.stream.start();
+	}
+
+	/** A short label identifying this session in every notification it sends. */
+	buildSessionTag(): string {
+		const dir = basename(this.cwd) || "omp";
+		const seed = `${this.#pi.getSessionName?.() ?? ""}|${this.cwd}|${process.pid}`;
+		const short = createHash("sha1").update(seed).digest("hex").slice(0, 4);
+		return `${dir}·${short}`;
+	}
+
+	/** (Re)create the lock if the app credential changed since we last took over. */
+	#ensureLock(): TakeoverLock {
+		const clientId = this.cfg.stream.clientId;
+		if (!this.lock || this.#lockClientId !== clientId) {
+			this.lock?.release();
+			this.lock = new TakeoverLock(clientId, this.log);
+			this.#lockClientId = clientId;
+		}
+		return this.lock;
+	}
+
+	#startLockHeartbeat(): void {
+		this.#stopLockHeartbeat();
+		this.#lockTimer = setInterval(() => {
+			try {
+				this.#onLockTick();
+			} catch (error) {
+				this.log.error("接管锁心跳异常", error);
+			}
+		}, heartbeatMs());
+		this.#lockTimer.unref?.();
+	}
+
+	#stopLockHeartbeat(): void {
+		if (this.#lockTimer) {
+			clearInterval(this.#lockTimer);
+			this.#lockTimer = undefined;
+		}
+	}
+
+	/**
+	 * Stand down if another session took the lock from us.
+	 *
+	 * Without this the two Stream connections would both stay open, and DingTalk
+	 * would route messages to whichever it feels like — the exact split-brain the
+	 * lock exists to prevent.
+	 */
+	#onLockTick(): void {
+		const lock = this.lock;
+		if (!lock?.held) return;
+		const preemptedBy = lock.heartbeat();
+		if (!preemptedBy) return;
+
+		this.log.warn(`接管已被另一个会话抢占：${preemptedBy.cwd} (PID ${preemptedBy.pid})`);
+		const victim = this.cwd;
+		this.release();
+		this.notify(
+			fmtText(
+				"⚠️ 钉钉接管已被抢占",
+				[
+					`另一个会话（目录 \`${truncate(preemptedBy.cwd, 120)}\`，PID ${preemptedBy.pid}）接管了同一个钉钉应用。`,
+					``,
+					`本会话（\`${truncate(victim, 120)}\`）已自动释放，**钉钉里的消息不会再到达这里**。`,
+					``,
+					`想抢回来就在这个会话里重新执行 \`/dingtalk takeover\`。`,
+				].join("\n"),
+			),
+			{ priority: "high", bypassQuiet: true, bypassTakeover: true },
+		);
+	}
+
+	/**
+	 * Hand inbound control to DingTalk. Refuses (rather than half-working) when
+	 * the channel cannot actually be opened, so the terminal gets a real reason.
+	 */
+	takeOver(): { ok: boolean; reason?: string; preempted?: LockHolder } {
+		if (!this.cfg.enabled) return { ok: false, reason: "插件被 `enabled: false` 关闭了" };
+		if (!this.cfg.control.enabled) return { ok: false, reason: "`control.enabled: false`，入站控制已禁用" };
+		if (!this.cfg.stream.enabled) {
+			return {
+				ok: false,
+				reason: this.cfg.stream.clientId && this.cfg.stream.clientSecret
+					? "`stream.enabled: false`"
+					: "缺少 stream.clientId / clientSecret（或 stream.enabled 为 false）",
+			};
+		}
+		const already = this.takenOver;
+		const acquired = this.#ensureLock().acquire(this.cwd);
+		if (!acquired.ok) return { ok: false, reason: acquired.error };
+
+		this.takenOver = true;
+		this.#startLockHeartbeat();
+		this.startStream();
+		if (!already) this.log.info("钉钉已接管本会话", { scope: this.cfg.control.scope });
+		if (acquired.previous) {
+			this.log.warn(`已从另一个会话手里抢占接管：${acquired.previous.cwd} (PID ${acquired.previous.pid})`);
+		}
+		return { ok: true, preempted: acquired.previous };
+	}
+
+	/** Hand control back to the terminal and close the inbound channel. */
+	release(): { wasTakenOver: boolean } {
+		const wasTakenOver = this.takenOver;
+		this.takenOver = false;
+		this.#stopLockHeartbeat();
+		this.lock?.release();
+		if (this.stream) {
+			this.stream.stop();
+			this.stream = undefined;
+		}
+		this.streamStatus = { state: "idle", reconnects: this.streamStatus.reconnects };
+		// Nobody can answer them any more; resolving as deny is the safe default.
+		this.approvals.clear("已解除钉钉接管");
+		if (wasTakenOver) this.log.info("已解除钉钉接管");
+		return { wasTakenOver };
+	}
+
+	dispose(reason: string): void {
+		this.takenOver = false;
+		this.#stopLockHeartbeat();
+		this.lock?.release();
+		this.approvals.clear(reason);
+		if (this.stream) {
+			this.stream.stop();
+			this.stream = undefined;
+		}
+	}
+
+	/** Track the last assistant text so the idle notification can quote it. */
+	setLastAssistant(message: unknown): void {
+		const text = extractText(message).trim();
+		if (text) this.#lastAssistantText = text;
+	}
+
+	get lastAssistantText(): string {
+		return this.#lastAssistantText;
+	}
+
+	/** Build the config summary shown by `/dingtalk status`. */
+	configSummary(): string[] {
+		return describeConfig(this.loaded);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Approval matching
+// ---------------------------------------------------------------------------
+
+/** Translate a glob (`*`, `**`, `?`) into an anchored regex. */
+function globToRegExp(glob: string): RegExp {
+	let out = "^";
+	for (let i = 0; i < glob.length; i += 1) {
+		const char = glob[i];
+		if (char === "*") {
+			if (glob[i + 1] === "*") {
+				out += ".*";
+				i += 1;
+			} else {
+				out += "[^/]*";
+			}
+		} else if (char === "?") {
+			out += "[^/]";
+		} else {
+			out += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+		}
+	}
+	return new RegExp(`${out}$`, "i");
+}
+
+/** Returns a human-readable reason when the call needs remote approval. */
+function matchApprovalRules(event: { toolName?: string; input?: Record<string, unknown> }, rules: ApprovalRule[]): string | null {
+	const toolName = String(event.toolName ?? "");
+	const input = (event.input ?? {}) as Record<string, any>;
+
+	for (const rule of rules) {
+		const label = rule.label ? `（${rule.label}）` : "";
+		const scoped = Array.isArray(rule.tools) && rule.tools.length > 0;
+		if (scoped && !rule.tools!.includes(toolName)) continue;
+
+		if (toolName === "bash" && rule.patterns?.length) {
+			const command = String(input.command ?? "");
+			for (const pattern of rule.patterns) {
+				try {
+					if (new RegExp(pattern, "i").test(command)) return `命中规则${label}：/${pattern}/`;
+				} catch {
+					// A malformed user regex must not break every tool call.
+				}
+			}
+		}
+
+		if (rule.paths?.length) {
+			const target = String(input.path ?? input.file_path ?? input.filePath ?? "");
+			if (target) {
+				const normalized = target.replace(/\\/g, "/");
+				for (const glob of rule.paths) {
+					if (globToRegExp(glob).test(normalized)) return `命中规则${label}：路径 ${glob}`;
+				}
+			}
+		}
+
+		// A rule that only names tools means "always ask for these".
+		if (scoped && !rule.patterns?.length && !rule.paths?.length) {
+			return `工具 ${toolName} 在审批清单中${label}`;
+		}
+	}
+	return null;
+}
+
+/** Readable rendering of a tool call for the approval prompt. */
+function describeToolCall(event: { toolName?: string; input?: Record<string, unknown> }): string {
+	const toolName = String(event.toolName ?? "");
+	const input = (event.input ?? {}) as Record<string, any>;
+	switch (toolName) {
+		case "bash":
+			return `$ ${truncate(String(input.command ?? ""), 900)}`;
+		case "write":
+			return `write ${input.path ?? ""}\n\n${truncate(String(input.content ?? ""), 700)}`;
+		case "edit":
+			return `edit ${input.path ?? ""}\n\n${safeJson(input, 700)}`;
+		default:
+			return safeJson(input, 900);
+	}
+}
+
+/** Resolve after `ms` no matter what the promise does. */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+	return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms).unref?.())]);
+}
+
+// ---------------------------------------------------------------------------
+// Extension factory
+// ---------------------------------------------------------------------------
+
+export default function ompDingTalk(pi: ExtensionAPI): void {
+	const api = pi as unknown as ApiLike & {
+		appendEntry?: (customType: string, data?: unknown) => void;
+		logger?: unknown;
+		zod?: any;
+		on: (event: string, handler: (...args: any[]) => any) => void;
+		registerCommand: (name: string, options: any) => void;
+		registerTool: (definition: any) => void;
+	};
+
+	let bridge: Bridge | undefined;
+
+	/** Get (or lazily build) the bridge for a working directory. */
+	const ensure = (cwd: string): Bridge => {
+		if (bridge && bridge.cwd === cwd) return bridge;
+		if (bridge) {
+			// `dispose()` releases the takeover lock, so a cwd change silently hands
+			// control back to the terminal. Say so — otherwise DingTalk just stops
+			// reaching this session with no explanation.
+			if (bridge.takenOver) bridge.log.warn("工作目录变更，已释放钉钉接管（本会话不再受钉钉控制）");
+			bridge.dispose("工作目录变更");
+		}
+		bridge = new Bridge(api, cwd || process.cwd());
+		// The label lives in `format.ts`, which is shared by everything in this
+		// process. Only one bridge is ever live at a time (`dispose()` above), so
+		// re-asserting it here keeps the label pointing at the live session even
+		// when the cwd changes without a fresh `session_start`.
+		setSessionTag(bridge.buildSessionTag());
+		return bridge;
+	};
+
+	/** Wrap a handler so nothing it does can escape into the host. */
+	const safe =
+		(name: string, handler: (event: any, ctx: any) => unknown) =>
+		async (event: any, ctx: any): Promise<unknown> => {
+			try {
+				return await handler(event, ctx);
+			} catch (error) {
+				(bridge?.log ?? createLogger(undefined)).error(`事件 ${name} 处理失败`, error);
+				return undefined;
+			}
+		};
+
+	// -------------------------------------------------------------------------
+	// Session lifecycle
+	// -------------------------------------------------------------------------
+
+	pi.on(
+		"session_start",
+		safe("session_start", async (_event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+			b.refreshConfig();
+			b.sessionStartedAt = Date.now();
+			b.turnCount = 0;
+			b.turnStartedAt.clear();
+			b.restoreState(ctx);
+			// Label every notification from here on, so two sessions sharing one
+			// DingTalk account are still tellable apart.
+			setSessionTag(b.buildSessionTag());
+
+			for (const warning of b.warnings) b.log.warn(warning);
+
+			// Inbound control is opt-in and does not survive into a new session:
+			// only `control.autoTakeover` opens the channel by itself, otherwise
+			// the session waits for an explicit `/dingtalk takeover`.
+			if (b.cfg.control.autoTakeover) {
+				const result = b.takeOver();
+				if (!result.ok) b.log.warn(`自动接管失败：${result.reason}`);
+			} else if (b.takenOver) {
+				b.release();
+				b.log.info("新会话不再继承钉钉接管（control.autoTakeover = false）");
+			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
+				b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
+			}
+
+			if (b.cfg.notify.sessionStart) {
+				b.notify(
+					fmtSessionStart({
+						cwd: ctx?.cwd ?? process.cwd(),
+						model: ctx?.model ? `${ctx.model.provider ?? "?"}/${ctx.model.id ?? "?"}` : undefined,
+						sessionName: pi.getSessionName?.(),
+						warnings: b.warnings,
+						control: !b.cfg.enabled || !b.cfg.control.enabled ? "off" : b.takenOver ? "active" : "inert",
+						scope: b.cfg.control.scope,
+					}),
+					{ priority: "normal", dedupeKey: "session-start" },
+				);
+			}
+		}),
+	);
+
+	pi.on(
+		"turn_start",
+		safe("turn_start", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+			b.turnStartedAt.set(Number(event?.turnIndex ?? 0), Date.now());
+		}),
+	);
+
+	pi.on(
+		"turn_end",
+		safe("turn_end", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+			b.setLastAssistant(event?.message);
+
+			const turnIndex = Number(event?.turnIndex ?? 0);
+			const startedAt = b.turnStartedAt.get(turnIndex) ?? b.sessionStartedAt;
+			b.turnStartedAt.delete(turnIndex);
+			const durationMs = Date.now() - startedAt;
+
+			if (!b.cfg.notify.turnEnd.enabled) return;
+			if (durationMs < b.cfg.notify.turnEnd.minDurationMs) return;
+
+			b.notify(
+				fmtTurnEnd({
+					turnIndex,
+					durationMs,
+					text: extractText(event?.message),
+					tools: extractToolNames(event?.message),
+				}),
+				{ priority: "low", dedupeKey: `turn-${turnIndex}` },
+			);
+		}),
+	);
+
+	// `session_stop` is the reliable "the agent is now waiting for you" signal:
+	// it fires before settle and is awaited, unlike `agent_end`, which also
+	// fires for automatic continuations we should not announce.
+	pi.on(
+		"session_stop",
+		safe("session_stop", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+			b.turnCount += 1;
+			if (event?.last_assistant_message) b.setLastAssistant(event.last_assistant_message);
+
+			if (!b.cfg.notify.sessionStop) return;
+			b.notify(
+				fmtSessionStop({
+					durationMs: Date.now() - b.sessionStartedAt,
+					turns: b.turnCount,
+					text: b.lastAssistantText,
+				}),
+				{ priority: "normal", dedupeKey: "session-stop" },
+			);
+		}),
+	);
+
+	pi.on(
+		"session_shutdown",
+		safe("session_shutdown", async () => {
+			if (!bridge) return;
+			const b = bridge;
+			// Send (not enqueue) so the message actually leaves the machine before
+			// the process tears down, with a hard cap so shutdown cannot hang.
+			if (b.canPush && b.cfg.notify.sessionShutdown && !b.quiet) {
+				await withTimeout(
+					b.sender.send({
+						title: "omp 已退出",
+						text: `🔌 omp 已退出\n\n目录 \`${truncate(b.cwd, 120)}\``,
+						priority: "high",
+					}),
+					SHUTDOWN_SEND_TIMEOUT_MS,
+					{ ok: false },
+				);
+			}
+			b.dispose("会话退出");
+		}),
+	);
+
+	// -------------------------------------------------------------------------
+	// Remote approval gate
+	// -------------------------------------------------------------------------
+
+	pi.on(
+		"tool_call",
+		safe("tool_call", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+
+			if (!b.cfg.enabled || b.cfg.approval.mode !== "remote") return undefined;
+			if (!b.sender.configured) {
+				// No way to reach a human: blocking would stall until timeout.
+				b.log.warn("审批模式为 remote 但没有任何可用的出站通道，本次不做远程拦截");
+				return undefined;
+			}
+			if (!b.takenOver) {
+				// Same reasoning as above: without a takeover there is no inbound
+				// channel, so nobody can answer — gating here would just deny every
+				// dangerous command after a long timeout.
+				b.log.warn("审批模式为 remote 但钉钉尚未接管，无人能应答，本次不做远程拦截（执行 /dingtalk takeover 可开启）");
+				return undefined;
+			}
+
+			const rules = b.cfg.approval.rules.length > 0 ? b.cfg.approval.rules : DEFAULT_APPROVAL_RULES;
+			const reason = matchApprovalRules(event, rules);
+			if (!reason) return undefined;
+
+			const toolName = String(event?.toolName ?? "?");
+			const detail = describeToolCall(event);
+			let approvalId = "";
+
+			const decision = await b.approvals.request({
+				toolName,
+				reason,
+				detail,
+				timeoutMs: b.cfg.approval.timeoutMs,
+				onTimeout: b.cfg.approval.onTimeout,
+				onRequested: (approval) => {
+					approvalId = approval.id;
+					b.log.info(`等待远程审批 ${approval.id}`, { toolName, reason });
+					if (b.cfg.notify.approval) {
+						b.notify(
+							fmtApprovalRequest({
+								id: approval.id,
+								toolName,
+								reason,
+								detail,
+								timeoutMs: b.cfg.approval.timeoutMs,
+							}),
+							{ priority: "high", bypassQuiet: true },
+						);
+					}
+				},
+			});
+
+			if (decision === "approve") return undefined;
+
+			const message =
+				decision === "timeout"
+					? `远程审批超时（编号 ${approvalId}），按安全默认拒绝。需要执行请重新发起或改为人工批准。`
+					: `已被远程用户拒绝（编号 ${approvalId}）。`;
+			b.log.info(`工具调用被拦截: ${message}`, { toolName });
+			return { block: true, reason: message };
+		}),
+	);
+
+	// -------------------------------------------------------------------------
+	// Reliability notifications
+	// -------------------------------------------------------------------------
+
+	pi.on(
+		"auto_retry_start",
+		safe("auto_retry_start", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			if (!b.cfg.notify.errors) return;
+			if (Number(event?.attempt ?? 1) < 2) return; // the first retry is routine noise
+			b.notify(
+				fmtError({
+					kind: `🔄 第 ${event?.attempt ?? "?"}/${event?.maxAttempts ?? "?"} 次重试`,
+					detail: truncate(String(event?.errorMessage ?? ""), 600),
+					hint: `将在 ${Math.round(Number(event?.delayMs ?? 0) / 1000)}s 后重试`,
+				}),
+				{ priority: "normal", dedupeKey: "retry" },
+			);
+		}),
+	);
+
+	pi.on(
+		"auto_retry_end",
+		safe("auto_retry_end", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			if (!b.cfg.notify.errors || event?.success) return;
+			b.notify(
+				fmtError({
+					kind: "❌ 重试已耗尽",
+					detail: truncate(String(event?.finalError ?? "未知错误"), 800),
+					hint: "模型侧持续失败，可能需要换模型或检查网络/额度。",
+				}),
+				{ priority: "high", bypassQuiet: true },
+			);
+		}),
+	);
+
+	pi.on(
+		"credential_disabled",
+		safe("credential_disabled", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			if (!b.cfg.notify.errors) return;
+			b.notify(
+				fmtError({
+					kind: `🔑 凭据被禁用：${event?.provider ?? "?"}`,
+					detail: truncate(String(event?.disabledCause ?? ""), 600),
+					hint: "该提供商的凭据已被自动停用，需要重新登录或更换 API Key。",
+				}),
+				{ priority: "high", bypassQuiet: true, dedupeKey: `cred-${event?.provider ?? "?"}` },
+			);
+		}),
+	);
+
+	pi.on(
+		"goal_updated",
+		safe("goal_updated", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			if (!b.cfg.notify.goalUpdated) return;
+			const goal = event?.goal as { text?: string; title?: string; status?: string } | null;
+			if (!goal) return;
+			b.notify(
+				fmtText("🎯 目标更新", `- **状态**: ${goal.status ?? "?"}\n- **目标**: ${truncate(goal.title ?? goal.text ?? "", 300)}`),
+				{ priority: "low", dedupeKey: "goal" },
+			);
+		}),
+	);
+
+	pi.on(
+		"tool_execution_end",
+		safe("tool_execution_end", async (event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			const watch = b.cfg.notify.toolUse;
+			if (!b.cfg.notify.toolUse.enabled) return;
+			const toolName = String(event?.toolName ?? "");
+			if (watch.tools.length > 0 && !watch.tools.includes(toolName)) return;
+			if (!event?.isError) return; // successes are too chatty to report one by one
+			b.notify(
+				fmtError({
+					kind: `工具执行失败：${toolName}`,
+					detail: safeJson(event?.result, 700),
+				}),
+				{ priority: "low", dedupeKey: `tool-${toolName}` },
+			);
+		}),
+	);
+
+	// -------------------------------------------------------------------------
+	// Local (in-terminal) surface
+	// -------------------------------------------------------------------------
+
+	pi.registerCommand("dingtalk", {
+		description: "钉钉机器人：status | takeover | release | test | quiet on|off | help",
+		handler: async (args: string, ctx: any) => {
+			try {
+				const b = ensure(ctx?.cwd ?? process.cwd());
+				b.ctx = ctx;
+				const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
+				const action = (sub ?? "").toLowerCase();
+
+				if (action === "takeover" || action === "接管") {
+					const result = b.takeOver();
+					const hint = b.cfg.notify.onlyWhenTakenOver
+						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
+						: "";
+					const stolen = result.preempted
+						? ` 已从另一个会话手里抢占（\`${truncate(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}），它会在 ${Math.round(heartbeatMs() / 1000)} 秒内自动释放。`
+						: "";
+					ctx.ui?.notify?.(
+						result.ok
+							? `钉钉已接管本会话（${SCOPE_LABELS[b.cfg.control.scope] ?? b.cfg.control.scope}）。现在可以在钉钉里发消息指挥它；用 /dingtalk release 解除。${stolen}${hint}`
+							: `无法接管：${result.reason}`,
+						result.ok ? "info" : "error",
+					);
+					return;
+				}
+
+				if (action === "release" || action === "解除") {
+					const { wasTakenOver } = b.release();
+					const tail = wasTakenOver && b.cfg.notify.onlyWhenTakenOver ? " 通知也一并停了。" : "";
+					ctx.ui?.notify?.(wasTakenOver ? `已解除钉钉接管，入站通道已关闭。${tail}` : "当前本来就没有接管。", "info");
+					return;
+				}
+
+				if (action === "test") {
+					if (!b.sender.configured) {
+						ctx.ui?.notify?.(
+							`当前没有可用的出站通道（outbound.mode = ${b.cfg.outbound.mode}），无法发送测试消息。`,
+							"error",
+						);
+						return;
+					}
+					const result = await b.sender.send({
+						title: "omp 测试消息",
+						text: `## 👋 测试消息\n\n来自 \`${truncate(b.cwd, 120)}\`\n\n如果你看到这条消息，出站通道是通的。`,
+						priority: "high",
+					});
+					ctx.ui?.notify?.(result.ok ? "已发送测试消息，请查看钉钉。" : `发送失败：${result.errmsg ?? "未知错误"}`, result.ok ? "info" : "error");
+					return;
+				}
+
+				if (action === "quiet") {
+					const value = (rest[0] ?? "").toLowerCase();
+					const on = value ? ["on", "1", "true", "yes", "开"].includes(value) : !b.quiet;
+					b.setQuiet(on);
+					ctx.ui?.notify?.(on ? "钉钉通知已静音。" : "钉钉通知已恢复。", "info");
+					return;
+				}
+
+				if (action === "help" || action === "?") {
+					ctx.ui?.notify?.(
+						[
+							"/dingtalk status          — 配置 + 运行状态",
+							"/dingtalk takeover        — 让钉钉接管本会话（开启入站控制）",
+							"/dingtalk release         — 解除接管，关闭入站通道",
+							"/dingtalk test            — 发一条测试通知",
+							"/dingtalk quiet on|off    — 静音 / 恢复通知",
+						].join("\n"),
+						"info",
+					);
+					return;
+				}
+
+				const lines = [
+					...b.configSummary(),
+					...b.statusLines(),
+					`- **审批规则**: ${b.cfg.approval.mode === "remote" ? `${(b.cfg.approval.rules.length ? b.cfg.approval.rules : DEFAULT_APPROVAL_RULES).length} 条` : "未启用"}`,
+				];
+				ctx.ui?.notify?.(lines.join("\n"), "info");
+			} catch (error) {
+				ctx?.ui?.notify?.(`/dingtalk 执行失败: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		},
+	});
+
+	// A tool the model can call when it decides the user needs to know something
+	// without being at the keyboard.
+	const zod = api.zod;
+	if (zod) {
+		pi.registerTool({
+			name: "dingtalk_notify",
+			label: "DingTalk Notify",
+			description:
+				"Push a notification to the user's DingTalk. Use when the user asked to be told when a long task finishes, or when you are blocked and need a decision before continuing.",
+			parameters: zod.object({
+				title: zod.string().describe("Short notification title"),
+				message: zod.string().describe("Markdown body, keep it under ~500 characters"),
+				urgency: zod.enum(["low", "normal", "high"]).default("normal").describe("low may be dropped when rate limited"),
+			}),
+			async execute(_toolCallId: string, params: any, argA: any, argB: any, argC: any) {
+				// The host has shipped two different `execute` argument orders
+				// (`signal, onUpdate, ctx` and `onUpdate, ctx, signal`), so find the
+				// context structurally instead of trusting a position.
+				const candidates = [argA, argB, argC];
+				const ctx = candidates.find((c) => c && typeof c === "object" && ("cwd" in c || "ui" in c)) as any;
+				const b = ensure(ctx?.cwd ?? process.cwd());
+				b.ctx = ctx;
+				const blocked = b.pushBlockedReason;
+				if (blocked) {
+					return {
+						content: [{ type: "text", text: `通知未发送：${blocked}` }],
+						details: { sent: false },
+						isError: true,
+					};
+				}
+				const result = await b.sender.send({
+					title: truncate(params?.title ?? "omp 通知", 60),
+					text: `${String(params?.message ?? "")}\n\n---\n<font color="#999999" size="1">来自 omp · ${truncate(b.cwd, 80)}</font>`,
+					priority: params?.urgency ?? "normal",
+				});
+				return {
+					content: [{ type: "text", text: result.ok ? "通知已发送到钉钉。" : `发送失败：${result.errmsg ?? "未知错误"}` }],
+					details: { sent: result.ok, errcode: result.errcode },
+					isError: !result.ok,
+				};
+			},
+		});
+	} else {
+		createLogger(api.logger).warn("pi.zod 不可用，跳过 dingtalk_notify 工具注册");
+	}
+}
+
+export { fmtHelp };

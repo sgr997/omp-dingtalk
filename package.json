@@ -1,0 +1,20 @@
+{
+  "name": "omp-dingtalk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DingTalk bridge for OMP — push session notifications to DingTalk and control a running coding session from your phone.",
+  "type": "module",
+  "scripts": {
+    "test": "bun test/smoke.ts && bun test/verify-load.ts",
+    "test:smoke": "bun test/smoke.ts",
+    "test:load": "bun test/verify-load.ts",
+    "doctor": "bun scripts/doctor.ts",
+    "watch": "bun scripts/debug-stream.ts"
+  },
+  "omp": {
+    "extensions": ["./src/index.ts"]
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}

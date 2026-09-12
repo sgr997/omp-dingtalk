@@ -1,0 +1,86 @@
+{
+  "$comment": "把本文件复制到 ~/.omp/dingtalk.json（或 <项目>/.omp/dingtalk.json）后按需修改。所有字段都有默认值，只需填你要用的部分。",
+
+  "enabled": true,
+
+  "webhook": {
+    "$comment": "群通知通道（outbound.mode 为 webhook / both 时使用）。钉钉群 → 群设置 → 智能群助手 → 添加机器人 → 自定义机器人。三种安全设置选一种即可。",
+    "url": "https://oapi.dingtalk.com/robot/send?access_token=在此填入access_token",
+    "secret": "",
+    "$comment_secret": "选了「加签」就把 SEC 开头的密钥填这里；选「自定义关键词」则留空 secret，填下面的 keyword。",
+    "keyword": "",
+    "$comment_keyword": "例如填「omp」，插件会自动把关键词加进每条消息，避免被钉钉拦截。"
+  },
+
+  "stream": {
+    "$comment": "入站控制通道。需要在钉钉开放平台创建「企业内部应用」，添加「机器人」能力并选择 Stream 模式后发布，然后把这个机器人加进群。",
+    "enabled": true,
+    "clientId": "",
+    "clientSecret": "",
+    "robotCode": "",
+    "$comment_robotCode": "机器人详情页的 robotCode（ding 开头）。出站选 direct / both 时必填，单聊推送要用。"
+  },
+
+  "outbound": {
+    "$comment": "通知走哪条路。webhook = 群里那个自定义机器人（只能发群，没法私聊）；direct = 企业内部应用机器人 1:1 私聊推送；both = 两边都发。",
+    "mode": "webhook",
+    "$comment_mode": "想「只收单聊、不打扰群」就改成 direct，并把下面的 directUserIds 填上。",
+    "directUserIds": [],
+    "$comment_directUserIds": "单聊收件人的钉钉 userId，也就是入站消息里的 senderStaffId（给机器人发 /id 就能拿到）。",
+    "learnFromInbound": true,
+    "$comment_learnFromInbound": "开启后，白名单里的人给机器人发条消息就自动成为收件人，省得手抄 ID。只认 control.allowUserIds 里的人。"
+  },
+
+  "notify": {
+    "sessionStart": true,
+    "sessionStop": true,
+    "$comment_sessionStop": "本轮跑完、omp 空闲时通知你，这是最主要的「任务完成」提醒。",
+    "sessionShutdown": true,
+    "errors": true,
+    "approval": true,
+    "goalUpdated": false,
+    "turnEnd": {
+      "enabled": false,
+      "$comment": "每轮都通知会很吵，默认关闭。开了之后只通知耗时超过 minDurationMs 的轮次。",
+      "minDurationMs": 60000
+    },
+    "toolUse": {
+      "enabled": false,
+      "$comment": "工具执行失败时通知。",
+      "tools": ["bash", "write", "edit"]
+    },
+    "atMobiles": [],
+    "atUserIds": [],
+    "atAll": false,
+    "maxTextChars": 1800,
+    "onlyWhenTakenOver": false,
+    "$comment_onlyWhenTakenOver": "true = 接管前完全静默：没执行 /dingtalk takeover 之前一条通知都不发（含错误告警和退出通知），接管后才开始发，release 后又停。注意它要求能接管（stream 凭据齐全），否则会永远收不到通知。"
+  },
+
+  "approval": {
+    "$comment": "远程审批闸门。off = 只通知不拦截；remote = 命中规则的敏感操作会挂起，等你在钉钉里回「同意/拒绝」。",
+    "mode": "off",
+    "timeoutMs": 300000,
+    "onTimeout": "deny",
+    "$comment_rules": "留空数组则使用内置的危险操作规则（rm -rf / sudo / git push / 敏感文件写入等）。",
+    "rules": []
+  },
+
+  "control": {
+    "enabled": true,
+    "scope": "direct",
+    "$comment_scope": "direct = 只认单聊，群里 @ 机器人也一律不理（推荐）。group = 只认群聊。all = 两者都认。",
+    "autoTakeover": false,
+    "$comment_autoTakeover": "false（推荐）= 每个新会话都要在 omp 里敲 /dingtalk takeover 才接通入站通道。true = 会话一启动就自动接管。",
+    "requireAt": true,
+    "$comment_requireAt": "群聊里只有 @ 机器人时才响应，避免群里闲聊误触发。scope 为 direct 时无影响。",
+    "allowUserIds": [],
+    "$comment_allowUserIds": "强烈建议填写。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。留空则任何能触达机器人的人都能控制 omp。",
+    "freeText": true,
+    "freeTextDelivery": "steer",
+    "$comment_freeTextDelivery": "steer = 打断当前轮次立刻执行；followUp = 等当前轮次跑完再执行。",
+    "replyToSession": true
+  },
+
+  "quiet": false
+}

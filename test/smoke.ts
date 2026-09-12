@@ -1,0 +1,1076 @@
+/**
+ * End-to-end smoke test — no real DingTalk credentials required.
+ *
+ * Everything external is mocked: `fetch` (webhook + stream gateway) and the
+ * global `WebSocket` (so inbound frames can be injected by hand). What is
+ * actually exercised is the plugin's own logic: config loading, event wiring,
+ * rate-limited sending, stream framing/ACK/dedupe, conversation-scope filtering,
+ * the opt-in takeover gate, command routing, the remote approval gate, and the
+ * safety of the "no credentials" / "not taken over" paths.
+ *
+ * Run with:  bun test/smoke.ts
+ */
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+
+// --- environment must be set before the plugin modules are imported ---------
+const scratch = mkdtempSync(join(tmpdir(), "omp-dingtalk-smoke-"));
+const configPath = join(scratch, "dingtalk.json");
+
+/**
+ * The config the bulk of the suite runs against.
+ *
+ * `scope: "direct"` + `autoTakeover: true` keeps the inbound path open so the
+ * routing and approval cases can be exercised; the default (inert) behaviour is
+ * covered separately in section [16].
+ */
+const MAIN_CONTROL = {
+	scope: "direct",
+	autoTakeover: true,
+	requireAt: true,
+	allowUserIds: [] as string[],
+	freeText: true,
+	freeTextDelivery: "steer",
+	replyToSession: true,
+};
+const MAIN_CONFIG = {
+	webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=TESTTOKEN", secret: "SECsmoke", keyword: "" },
+	stream: { enabled: true, clientId: "smoke-client", clientSecret: "smoke-secret", robotCode: "dingsmoke" },
+	approval: { mode: "remote", timeoutMs: 1_500, onTimeout: "deny" },
+	control: MAIN_CONTROL,
+	notify: { turnEnd: { enabled: true, minDurationMs: 0 } },
+};
+writeFileSync(configPath, JSON.stringify(MAIN_CONFIG, null, 2));
+process.env.OMP_DINGTALK_CONFIG = configPath;
+// Collapse the rate limiter so the test finishes in seconds.
+process.env.OMP_DINGTALK_MIN_GAP_MS = "5";
+process.env.OMP_DINGTALK_MAX_PER_MIN = "200";
+// Keep takeover locks out of the real `~/.omp/agent` — a test run must not be
+// able to displace the user's live session, and must not leave litter behind.
+process.env.OMP_DINGTALK_LOCK_DIR = join(scratch, "locks");
+// Shrink the preemption-detection window so the multi-session cases below do
+// not have to wait 5 seconds for a heartbeat.
+process.env.OMP_DINGTALK_HEARTBEAT_MS = "150";
+
+// --- tiny assertion harness -------------------------------------------------
+let passed = 0;
+const failures: string[] = [];
+function check(name: string, condition: boolean, extra?: unknown): void {
+	if (condition) {
+		passed += 1;
+		console.log(`  ok   ${name}`);
+	} else {
+		failures.push(name);
+		console.log(`  FAIL ${name}${extra === undefined ? "" : ` :: ${JSON.stringify(extra)}`}`);
+	}
+}
+
+const tick = (ms = 60) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitFor(predicate: () => boolean, timeoutMs = 4_000): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) return true;
+		await tick(20);
+	}
+	return predicate();
+}
+
+// --- fetch mock -------------------------------------------------------------
+interface Recorded {
+	url: string;
+	body: any;
+}
+const requests: Recorded[] = [];
+
+function response(data: unknown) {
+	return {
+		ok: true,
+		status: 200,
+		text: async () => JSON.stringify(data),
+		json: async () => data,
+	} as unknown as Response;
+}
+
+globalThis.fetch = (async (input: any, init?: any) => {
+	const url = typeof input === "string" ? input : String(input?.url ?? input);
+	let body: any;
+	try {
+		body = init?.body ? JSON.parse(String(init.body)) : undefined;
+	} catch {
+		body = undefined;
+	}
+	requests.push({ url, body });
+	// Set SMOKE_TRACE=1 to see every outbound call in order — invaluable when an
+	// assertion about "the latest notification" fails.
+	if (process.env.SMOKE_TRACE && url.includes("dingtalk.com")) {
+		console.log(`    [net ${String(requests.length).padStart(3)}] ${String(body?.markdown?.title ?? url.slice(0, 70))}`);
+	}
+
+	if (url.includes("/gateway/connections/open")) {
+		return response({ endpoint: "wss://stream.invalid/connect", ticket: "smoke-ticket" });
+	}
+	if (url.includes("/oauth2/accessToken")) {
+		return response({ accessToken: "smoke-access-token", expireIn: 7200 });
+	}
+	if (url.includes("/robot/oToMessages/batchSend")) {
+		return response({ processQueryKey: "q1" });
+	}
+	// custom robot webhook / sessionWebhook
+	return response({ errcode: 0, errmsg: "ok" });
+}) as typeof fetch;
+
+const webhookPosts = () => requests.filter((r) => r.url.includes("oapi.dingtalk.com/robot/send"));
+const sessionReplies = () => requests.filter((r) => r.url.includes("sendBySession"));
+const approvalPosts = () =>
+	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("需要批准"));
+
+// `webhookPosts()` also matches `sendBySession` replies, which is fine for the
+// older assertions but too loose for "did this go to the group". `groupPosts()`
+// matches the custom-robot webhook only; `otoPosts()` is the 1:1 push API.
+const groupPosts = () => requests.filter((r) => r.url.includes("/robot/send?"));
+const otoPosts = () => requests.filter((r) => r.url.includes("/robot/oToMessages/batchSend"));
+
+// --- WebSocket mock ---------------------------------------------------------
+class MockSocket {
+	static OPEN = 1;
+	static instances: MockSocket[] = [];
+	readyState = 0;
+	onopen: (() => void) | undefined;
+	onmessage: ((event: { data: string }) => void) | undefined;
+	onclose: (() => void) | undefined;
+	onerror: (() => void) | undefined;
+	sent: any[] = [];
+
+	constructor(readonly url: string) {
+		MockSocket.instances.push(this);
+	}
+
+	open(): void {
+		this.readyState = MockSocket.OPEN;
+		this.onopen?.();
+	}
+
+	send(data: string): void {
+		this.sent.push(JSON.parse(data));
+	}
+
+	close(): void {
+		this.readyState = 3;
+		this.onclose?.();
+	}
+
+	frame(payload: unknown): void {
+		this.onmessage?.({ data: JSON.stringify(payload) });
+	}
+
+	system(topic: string): void {
+		this.frame({ specVersion: "1.0", type: "SYSTEM", headers: { topic, messageId: `sys-${topic}` }, data: "" });
+	}
+
+	/**
+	 * Inject an inbound robot message the way the gateway would.
+	 *
+	 * Defaults to a **1:1 chat** because that is what the plugin accepts by
+	 * default; pass `conversationType: "2"` to simulate a group.
+	 */
+	robot(text: string, overrides: Record<string, unknown> = {}): void {
+		const payload = {
+			conversationId: "cid-smoke",
+			conversationType: "1",
+			conversationTitle: "",
+			msgId: `msg-${Math.random().toString(36).slice(2)}`,
+			senderNick: "我",
+			senderStaffId: "staff-smoke",
+			isInAtList: true,
+			sessionWebhook: "https://oapi.dingtalk.com/robot/sendBySession?session=smoke",
+			sessionWebhookExpiredTime: Date.now() + 3_600_000,
+			createAt: Date.now(),
+			robotCode: "dingsmoke",
+			msgtype: "text",
+			text: { content: ` ${text}` },
+			...overrides,
+		};
+		this.frame({
+			specVersion: "1.0",
+			type: "CALLBACK",
+			headers: {
+				messageId: `cb-${Math.random().toString(36).slice(2)}`,
+				topic: "/v1.0/im/bot/messages/get",
+				contentType: "application/json",
+			},
+			// The real gateway sends `data` as a plain JSON string, NOT base64.
+			// Encoding it here would make the mock agree with a broken parser.
+			data: JSON.stringify(payload),
+		});
+	}
+}
+(globalThis as any).WebSocket = MockSocket;
+
+// --- mock extension host ----------------------------------------------------
+type Handler = (event: any, ctx: any) => any;
+const handlers = new Map<string, Handler[]>();
+const commands = new Map<string, any>();
+const tools = new Map<string, any>();
+const notices: string[] = [];
+const sentPrompts: { text: string; options: any }[] = [];
+let abortCount = 0;
+const appended: any[] = [];
+
+function schema(): any {
+	const node: any = {
+		describe: () => node,
+		default: () => node,
+		optional: () => node,
+	};
+	return node;
+}
+const zod = {
+	object: () => schema(),
+	string: () => schema(),
+	enum: () => schema(),
+	number: () => schema(),
+	boolean: () => schema(),
+};
+
+const ctx: any = {
+	cwd: process.cwd(),
+	hasUI: true,
+	ui: { notify: (message: string) => notices.push(message) },
+	model: { id: "smoke-model", provider: "smoke" },
+	models: { resolve: (spec: string) => ({ id: spec, provider: "smoke" }), current: () => ({ id: "smoke-model" }) },
+	isIdle: () => true,
+	hasPendingMessages: () => false,
+	abort: () => {
+		abortCount += 1;
+	},
+	compact: async () => {},
+	sessionManager: { getBranch: () => [] },
+};
+
+const pi: any = {
+	logger: { debug() {}, info() {}, warn() {}, error() {} },
+	zod,
+	on: (event: string, handler: Handler) => {
+		const list = handlers.get(event) ?? [];
+		list.push(handler);
+		handlers.set(event, list);
+	},
+	registerCommand: (name: string, options: any) => commands.set(name, options),
+	registerTool: (definition: any) => tools.set(definition.name, definition),
+	getSessionName: () => "smoke-session",
+	getActiveTools: () => ["bash", "read", "write", "edit"],
+	setModel: async () => true,
+	appendEntry: (customType: string, data: unknown) => appended.push({ customType, data }),
+	sendUserMessage: (text: string, options: any) => sentPrompts.push({ text, options }),
+};
+
+async function fire(event: string, payload: any): Promise<any[]> {
+	const list = handlers.get(event) ?? [];
+	const results: any[] = [];
+	for (const handler of list) results.push(await handler(payload, ctx));
+	return results;
+}
+
+// --- run --------------------------------------------------------------------
+console.log("\n[1] factory load & registration");
+const { default: factory } = await import("../src/index.ts");
+factory(pi);
+check("注册了 session_start", handlers.has("session_start"));
+check("注册了 tool_call", handlers.has("tool_call"));
+check("注册了 session_stop", handlers.has("session_stop"));
+check("注册了 /dingtalk 命令", commands.has("dingtalk"));
+check("注册了 dingtalk_notify 工具", tools.has("dingtalk_notify"));
+
+console.log("\n[2] session_start → 通知 + Stream 建连");
+await fire("session_start", { type: "session_start" });
+check("发出了会话启动通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title).includes("已启动"))), requests.length);
+check("启动通知写明已接管（autoTakeover: true）", String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("已接管"), String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 200));
+check("webhook URL 带上了加签参数", webhookPosts()[0]?.url.includes("timestamp=") && webhookPosts()[0]?.url.includes("sign="));
+// Two sessions sharing one DingTalk account must still be tellable apart, so
+// every notification carries `目录名·随机短码`.
+const startText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
+check("启动通知带上了会话标识", startText.includes(`omp · ${basename(process.cwd())}·`), startText.slice(-90));
+check("Stream 已请求接入点", await waitFor(() => requests.some((r) => r.url.includes("/gateway/connections/open"))));
+const socket = await (async () => {
+	await waitFor(() => MockSocket.instances.length > 0);
+	return MockSocket.instances[0];
+})();
+check("WebSocket 已建立", Boolean(socket), MockSocket.instances.length);
+socket.open();
+socket.system("REGISTERED");
+check("收到 REGISTERED 后进入 registered", await waitFor(() => true));
+
+console.log("\n[3] 入站指令：状态 / 帮助 / 身份");
+socket.robot("状态");
+check("`状态` 得到了会话回复", await waitFor(() => sessionReplies().length >= 1), sessionReplies().length);
+check("回复内容包含模型信息", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("smoke-model"));
+const beforeHelp = sessionReplies().length;
+socket.robot("帮助");
+check("`帮助` 得到了回复", await waitFor(() => sessionReplies().length > beforeHelp));
+check("ACK 帧已回给服务端", socket.sent.some((frame) => frame.code === 200 && frame.headers?.messageId));
+check("CALLBACK 的 ACK 形如 {response:{}}（与官方 SDK 一致）", socket.sent.some((frame) => frame.data === '{"response":{}}'));
+
+// Compatibility path: some SDK builds / older docs base64-encode `data`.
+const beforeB64 = sessionReplies().length;
+socket.frame({
+	specVersion: "1.0",
+	type: "CALLBACK",
+	headers: { messageId: `cb-b64-${Math.random().toString(36).slice(2)}`, topic: "/v1.0/im/bot/messages/get", contentType: "application/json" },
+	data: Buffer.from(
+		JSON.stringify({
+			conversationType: "1",
+			senderStaffId: "staff-smoke",
+			isInAtList: true,
+			sessionWebhook: "https://oapi.dingtalk.com/robot/sendBySession?session=smoke",
+			sessionWebhookExpiredTime: Date.now() + 3_600_000,
+			text: { content: " /ping" },
+		}),
+		"utf8",
+	).toString("base64"),
+});
+check("base64 形式的 data 也能解析（兼容路径）", await waitFor(() => sessionReplies().length > beforeB64), sessionReplies().length - beforeB64);
+
+console.log("\n[4] 会话范围：默认仅单聊");
+{
+	// Under `scope: "direct"` a group message is ignored outright — even when
+	// the robot is @-mentioned. Only 1:1 chatter reaches the command router.
+	const beforeGroup = sessionReplies().length;
+	socket.robot("状态", { conversationType: "2", conversationTitle: "omp 测试群", isInAtList: true });
+	await tick(200);
+	check("群聊消息被忽略（即使 @ 了机器人）", sessionReplies().length === beforeGroup, sessionReplies().length - beforeGroup);
+
+	const beforeDirect = sessionReplies().length;
+	socket.robot("状态");
+	check("单聊消息正常处理", await waitFor(() => sessionReplies().length > beforeDirect));
+}
+
+console.log("\n[5] 白名单鉴权");
+{
+	// Re-point config at a copy with an allowlist, then reload via a fresh session.
+	writeFileSync(
+		configPath,
+		JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserIds: ["someone-else"] } }),
+	);
+	await fire("session_start", { type: "session_start" });
+	const before = sessionReplies().length;
+	const latest = MockSocket.instances.at(-1)!;
+	latest.open();
+	latest.system("REGISTERED");
+	latest.robot("状态");
+	check("白名单外的发送者被拒绝", await waitFor(() => sessionReplies().length > before));
+	check("拒绝提示包含 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"));
+}
+
+// Restore the permissive config for the remaining cases.
+writeFileSync(configPath, JSON.stringify(MAIN_CONFIG));
+await fire("session_start", { type: "session_start" });
+const live = MockSocket.instances.at(-1)!;
+live.open();
+live.system("REGISTERED");
+
+console.log("\n[6] 远程审批：批准");
+{
+	const pending = fire("tool_call", { type: "tool_call", toolCallId: "t-approve", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
+	check("危险命令触发了审批通知", await waitFor(() => approvalPosts().length >= 1));
+	const id = /`([A-Z0-9]{4,})`/.exec(String(approvalPosts().at(-1)?.body?.markdown?.text ?? ""))?.[1] ?? "";
+	check("审批通知里带了编号", Boolean(id), id);
+	// Approvals carry no footer, so the origin has to be an explicit line —
+	// otherwise a request from a *different* session looks like it is yours.
+	check(
+		"审批通知点明了来自哪个会话",
+		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").includes(`来自**: \`${basename(process.cwd())}·`),
+		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 200),
+	);
+	live.robot("同意");
+	const [result] = await pending;
+	check("批准后放行（无 block）", !result || result.block !== true, result);
+}
+
+console.log("\n[7] 远程审批：拒绝");
+{
+	const pending = fire("tool_call", { type: "tool_call", toolCallId: "t-deny", toolName: "bash", input: { command: "git push --force origin main" } });
+	await waitFor(() => approvalPosts().length >= 2);
+	live.robot("拒绝");
+	const [result] = await pending;
+	check("拒绝后拦截执行", result?.block === true, result);
+	check("拦截原因提到远程拒绝", String(result?.reason ?? "").includes("拒绝"), result?.reason);
+}
+
+console.log("\n[8] 远程审批：超时按安全默认拒绝");
+{
+	const [result] = await fire("tool_call", { type: "tool_call", toolCallId: "t-timeout", toolName: "bash", input: { command: "rm -rf /" } });
+	check("超时后拦截执行", result?.block === true, result);
+	check("拦截原因提到超时", String(result?.reason ?? "").includes("超时"), result?.reason);
+}
+
+console.log("\n[9] 普通命令不应被拦截");
+{
+	const [result] = await fire("tool_call", { type: "tool_call", toolCallId: "t-safe", toolName: "bash", input: { command: "ls -la src" } });
+	check("安全命令直接放行", result === undefined, result);
+}
+
+console.log("\n[10] 自由文本 → 注入会话，且不会误判为指令");
+{
+	const before = sentPrompts.length;
+	live.robot("stop the server on port 3000");
+	check("自由文本被投递为 prompt", await waitFor(() => sentPrompts.length > before), sentPrompts);
+	check("未触发 abort", abortCount === 0, abortCount);
+	check("投递方式为 steer", sentPrompts.at(-1)?.options?.deliverAs === "steer");
+
+	live.robot("停止");
+	check("单独的 `停止` 触发中断", await waitFor(() => abortCount === 1), abortCount);
+
+	const beforeFollow = sentPrompts.length;
+	live.robot("/follow 帮我跑一遍测试");
+	check("/follow 以 followUp 投递", await waitFor(() => sentPrompts.length > beforeFollow) && sentPrompts.at(-1)?.options?.deliverAs === "followUp");
+}
+
+console.log("\n[11] 静音开关");
+{
+	live.robot("/quiet on");
+	check("静音指令得到回复", await waitFor(() => String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("静音")));
+	const beforeQuiet = webhookPosts().length;
+	await fire("turn_end", { type: "turn_end", turnIndex: 0, message: { role: "assistant", content: [{ type: "text", text: "done" }] }, toolResults: [] });
+	await tick(200);
+	check("静音后不再发通知", webhookPosts().length === beforeQuiet, webhookPosts().length - beforeQuiet);
+	live.robot("/quiet off");
+	await waitFor(() => String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("恢复"));
+}
+
+console.log("\n[12] 会话事件 → 通知");
+{
+	const before = webhookPosts().length;
+	await fire("turn_end", {
+		type: "turn_end",
+		turnIndex: 1,
+		message: { role: "assistant", content: [{ type: "text", text: "已修好登录接口" }, { type: "toolCall", name: "edit" }] },
+		toolResults: [],
+	});
+	check("turn_end 触发通知", await waitFor(() => webhookPosts().length > before));
+	check("通知里包含最后回复", String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("已修好登录接口"));
+
+	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 1, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "全部完成" }] }, session_id: "s1", stop_hook_active: false });
+	// Match the exact title: a loose `includes("空闲")` also matches the `/stop`
+	// reply "ℹ️ omp 本来就空闲", which would let this pass without the session_stop
+	// notification ever being delivered.
+	check("session_stop 触发空闲通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title) === "omp 空闲中")));
+}
+
+console.log("\n[13] dingtalk_notify 工具");
+{
+	const tool = tools.get("dingtalk_notify");
+	const result = await tool.execute("call-1", { title: "测试", message: "来自冒烟测试", urgency: "high" }, undefined, undefined, ctx);
+	check("工具返回成功", result?.details?.sent === true, result?.details);
+	check("消息已发出", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title).includes("测试"))));
+}
+
+console.log("\n[14] /dingtalk 本地命令");
+{
+	await commands.get("dingtalk").handler("test", ctx);
+	check("本地 test 子命令发送成功", notices.at(-1)?.includes("已发送测试消息"), notices.at(-1));
+	await commands.get("dingtalk").handler("status", ctx);
+	check("本地 status 输出配置摘要", notices.at(-1)?.includes("入站 Stream"), notices.at(-1));
+}
+
+console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover");
+{
+	// Same credentials, but `autoTakeover` left off: the session must stay inert
+	// until the terminal asks for control. It must also *drop* control inherited
+	// from the previous session.
+	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, autoTakeover: false } }));
+	// Snapshot the posts first: a notification still queued from an earlier
+	// section can be delivered after this one, so "the last post" is not a safe
+	// way to find this section's own message.
+	const postsBefore = webhookPosts().length;
+	await fire("session_start", { type: "session_start" });
+
+	const connects = () => requests.filter((r) => r.url.includes("/gateway/connections/open")).length;
+	const before = connects();
+	await tick(300);
+	check("autoTakeover=false 时不建立入站连接", connects() === before, connects() - before);
+	const startPost = webhookPosts()
+		.slice(postsBefore)
+		.find((r) => String(r.body?.markdown?.title).includes("已启动"));
+	check(
+		"启动通知提示尚未接管",
+		String(startPost?.body?.markdown?.text ?? "").includes("尚未接管"),
+		String(startPost?.body?.markdown?.text ?? "(本次 session_start 没有发出启动通知)").slice(0, 300),
+	);
+
+	await commands.get("dingtalk").handler("takeover", ctx);
+	check("takeover 提示已接管", String(notices.at(-1) ?? "").includes("已接管"), notices.at(-1));
+	check("takeover 后才开始建连", await waitFor(() => connects() > before));
+	check(
+		"接管后 socket 已建立",
+		await waitFor(() => MockSocket.instances.at(-1)?.readyState === 0),
+		MockSocket.instances.map((s) => s.readyState),
+	);
+
+	await commands.get("dingtalk").handler("status", ctx);
+	check("本地 status 显示接管状态", String(notices.at(-1) ?? "").includes("钉钉接管"), String(notices.at(-1) ?? "").slice(0, 400));
+}
+
+console.log("\n[16] /dingtalk release 关闭入站通道 + scope 反向过滤");
+{
+	const socketCount = MockSocket.instances.length;
+	await commands.get("dingtalk").handler("release", ctx);
+	check("release 提示已解除接管", String(notices.at(-1) ?? "").includes("解除"), notices.at(-1));
+	await tick(200);
+	check("release 后 WebSocket 被关闭", MockSocket.instances.at(-1)?.readyState === 3, MockSocket.instances.at(-1)?.readyState);
+	check("release 后不会自动重连", MockSocket.instances.length === socketCount, MockSocket.instances.length - socketCount);
+
+	// scope=group is the mirror image: 1:1 chatter is ignored, group @ works.
+	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, scope: "group" } }));
+	await fire("session_start", { type: "session_start" });
+	const groupSocket = MockSocket.instances.at(-1)!;
+	groupSocket.open();
+	groupSocket.system("REGISTERED");
+
+	const beforeGroup = sessionReplies().length;
+	groupSocket.robot("状态");
+	await tick(200);
+	check("scope=group 时单聊被忽略", sessionReplies().length === beforeGroup, sessionReplies().length - beforeGroup);
+
+	groupSocket.robot("状态", { conversationType: "2", isInAtList: false });
+	await tick(200);
+	check("scope=group 时未 @ 的群聊被忽略", sessionReplies().length === beforeGroup, sessionReplies().length - beforeGroup);
+
+	groupSocket.robot("状态", { conversationType: "2", isInAtList: true });
+	check("scope=group 时 @ 了才响应", await waitFor(() => sessionReplies().length > beforeGroup));
+
+	// Back to the main config so the shutdown case exercises the normal path.
+	writeFileSync(configPath, JSON.stringify(MAIN_CONFIG));
+	await fire("session_start", { type: "session_start" });
+	const restored = MockSocket.instances.at(-1)!;
+	restored.open();
+	restored.system("REGISTERED");
+}
+
+console.log("\n[17] 无凭据时必须安全降级");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-empty-"));
+	const emptyConfig = join(dir, "dingtalk.json");
+	// Approval is explicitly armed, so the stand-down is caused by the missing
+	// webhook rather than by the mode being off.
+	writeFileSync(emptyConfig, JSON.stringify({ approval: { mode: "remote" } }));
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = emptyConfig;
+
+	// A fresh module instance is needed because the config is read per Bridge.
+	const module = await import(`../src/index.ts?nocreds=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localPi: any = { ...pi, on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]) };
+	module.default(localPi);
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+
+	const gate = localHandlers.get("tool_call")![0];
+	const outcome = await gate({ type: "tool_call", toolCallId: "t-nocreds", toolName: "bash", input: { command: "rm -rf /" } }, ctx);
+	check("没有 webhook 时不拦截（避免无谓阻塞）", outcome === undefined, outcome);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[18] 未接管时审批闸门必须让路");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-inert-"));
+	const inertConfig = join(dir, "dingtalk.json");
+	// Webhook and credentials are fine; the only thing missing is a takeover.
+	writeFileSync(inertConfig, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, autoTakeover: false } }));
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = inertConfig;
+
+	const module = await import(`../src/index.ts?inert=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localPi: any = { ...pi, on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]) };
+	module.default(localPi);
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+	const gate = localHandlers.get("tool_call")![0];
+	const outcome = await gate({ type: "tool_call", toolCallId: "t-inert", toolName: "bash", input: { command: "rm -rf /" } }, ctx);
+	check("未接管时不拦截（否则每条危险命令都要等到超时）", outcome === undefined, outcome);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
+{
+	// No webhook at all: the group robot is not the transport any more, so a
+	// missing webhook.url must NOT count as "nothing can be sent".
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-direct-"));
+	const directConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		directConfig,
+		JSON.stringify({
+			webhook: { url: "" },
+			stream: { enabled: false, clientId: "direct-client", clientSecret: "direct-secret", robotCode: "ding-direct" },
+			outbound: { mode: "direct", directUserIds: ["user-1"], learnFromInbound: true },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = directConfig;
+
+	const module = await import(`../src/index.ts?direct=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localCommands = new Map<string, any>();
+	const localNotices: string[] = [];
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+	};
+	module.default(localPi);
+	const localCtx: any = { ...ctx, ui: { notify: (m: string) => localNotices.push(m) } };
+
+	// Let the previous section's queued notifications finish draining, so the
+	// "no group posts" baseline below is not polluted by them.
+	await tick(200);
+	const beforeGroup = groupPosts().length;
+	const beforeOto = otoPosts().length;
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
+
+	check("单聊模式下确实发出了 1:1 推送", await waitFor(() => otoPosts().length > beforeOto), otoPosts().length - beforeOto);
+	check("单聊模式下不再往群里发", groupPosts().length === beforeGroup, groupPosts().length - beforeGroup);
+
+	const pushed = otoPosts().at(-1)?.body;
+	check("推送带上了 robotCode", pushed?.robotCode === "ding-direct", pushed?.robotCode);
+	check("收件人取自 outbound.directUserIds", JSON.stringify(pushed?.userIds) === '["user-1"]', pushed?.userIds);
+	check("消息类型是 sampleMarkdown", pushed?.msgKey === "sampleMarkdown", pushed?.msgKey);
+	check(
+		"换 token 用的是 appKey / appSecret",
+		requests.some((r) => r.url.includes("/oauth2/accessToken") && r.body?.appKey === "direct-client" && r.body?.appSecret === "direct-secret"),
+	);
+
+	// /dingtalk test must follow the same transport rather than insisting on a webhook.
+	await localCommands.get("dingtalk").handler("test", localCtx);
+	check("本地 test 走单聊通道", String(localNotices.at(-1) ?? "").includes("已发送测试消息"), localNotices.at(-1));
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[20] outbound.mode = both 时两条通道都发");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-both-"));
+	const bothConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		bothConfig,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=BOTHTOKEN", secret: "" },
+			stream: { enabled: false, clientId: "both-client", clientSecret: "both-secret", robotCode: "ding-both" },
+			outbound: { mode: "both", directUserIds: ["user-2"], learnFromInbound: false },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = bothConfig;
+
+	const module = await import(`../src/index.ts?both=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localPi: any = { ...pi, on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]) };
+	module.default(localPi);
+
+	const beforeGroup = groupPosts().length;
+	const beforeOto = otoPosts().length;
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+
+	check("both 模式发出了群通知", await waitFor(() => groupPosts().length > beforeGroup), groupPosts().length - beforeGroup);
+	check("both 模式同时发出了单聊推送", await waitFor(() => otoPosts().length > beforeOto), otoPosts().length - beforeOto);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[21] 只把白名单内的人记成通知收件人");
+{
+	// direct mode with an empty recipient list: nothing can be sent until someone
+	// authorized talks to the robot, which is what `learnFromInbound` is for.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-learn-"));
+	const learnConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		learnConfig,
+		JSON.stringify({
+			webhook: { url: "" },
+			stream: { enabled: true, clientId: "learn-client", clientSecret: "learn-secret", robotCode: "ding-learn" },
+			outbound: { mode: "direct", directUserIds: [], learnFromInbound: true },
+			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct", allowUserIds: ["allowed-user"] },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = learnConfig;
+
+	const module = await import(`../src/index.ts?learn=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localCommands = new Map<string, any>();
+	const localNotices: string[] = [];
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+	};
+	module.default(localPi);
+	const localCtx: any = { ...ctx, ui: { notify: (m: string) => localNotices.push(m) } };
+
+	const socketsBefore = MockSocket.instances.length;
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
+	// `startStream()` is fire-and-forget, so the WebSocket only exists a few
+	// microtasks later — grabbing `at(-1)` straight away can hand back a socket
+	// left over from an earlier section.
+	await waitFor(() => MockSocket.instances.length > socketsBefore);
+	const socket = MockSocket.instances.at(-1)!;
+	socket.open();
+	socket.system("REGISTERED");
+
+	const recipients = async () => {
+		await localCommands.get("dingtalk").handler("status", localCtx);
+		const match = String(localNotices.at(-1) ?? "").match(/单聊收件人\*\*: (\d+) 人/);
+		return match ? Number(match[1]) : -1;
+	};
+	// `waitFor` takes a sync predicate, so poll by hand here.
+	const waitForRecipients = async (n: number) => {
+		const deadline = Date.now() + 4_000;
+		while (Date.now() < deadline) {
+			if ((await recipients()) === n) return true;
+			await tick(20);
+		}
+		return (await recipients()) === n;
+	};
+	check("没有收件人时队列里也没东西可发", (await recipients()) === 0);
+
+	// A stranger must not be able to subscribe themselves to the notifications.
+	socket.robot("/ping", { senderStaffId: "stranger" });
+	await tick(200);
+	check("白名单外的人不会被记成收件人", (await recipients()) === 0);
+
+	socket.robot("/ping", { senderStaffId: "allowed-user" });
+	check("白名单内的人被自动记成收件人", await waitForRecipients(1), await recipients());
+
+	const beforeOto = otoPosts().length;
+	await localHandlers.get("session_stop")![0](
+		{ type: "session_stop", last_assistant_message: { role: "assistant", content: [{ type: "text", text: "干完了" }] } },
+		localCtx,
+	);
+	check("之后的通知推给了这个人", await waitFor(() => otoPosts().length > beforeOto), otoPosts().length - beforeOto);
+	check("收件人就是他", JSON.stringify(otoPosts().at(-1)?.body?.userIds) === '["allowed-user"]', otoPosts().at(-1)?.body?.userIds);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[22] scope = direct 时群聊消息一律忽略");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-direct-scope-"));
+	const scopeConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		scopeConfig,
+		JSON.stringify({
+			...MAIN_CONFIG,
+			// Its own app credential: reusing the main session's would make this
+			// section preempt the main session's takeover lock, which is a
+			// different feature (covered in [26]) and would leave the rest of the
+			// suite running against a session that had quietly stood down.
+			stream: { ...MAIN_CONFIG.stream, clientId: "scope-client", clientSecret: "scope-secret", robotCode: "ding-scope" },
+			outbound: { mode: "webhook" },
+			control: { ...MAIN_CONTROL, scope: "direct", autoTakeover: true, requireAt: true, allowUserIds: [] },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = scopeConfig;
+
+	const module = await import(`../src/index.ts?scope=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localPi: any = { ...pi, on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]) };
+	module.default(localPi);
+
+	const socketsBefore = MockSocket.instances.length;
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+	await waitFor(() => MockSocket.instances.length > socketsBefore);
+	const socket = MockSocket.instances.at(-1)!;
+	socket.open();
+	socket.system("REGISTERED");
+
+	const before = sessionReplies().length;
+	// Even @-mentioned, a group message must not reach the session.
+	socket.robot("状态", { conversationType: "2", isInAtList: true });
+	await tick(250);
+	check("scope=direct 时 @ 了的群聊也被忽略", sessionReplies().length === before, sessionReplies().length - before);
+
+	socket.robot("状态", { conversationType: "1" });
+	check("scope=direct 时单聊照常响应", await waitFor(() => sessionReplies().length > before));
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-silent-"));
+	const silentConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		silentConfig,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=SILENTTOKEN", secret: "" },
+			stream: { enabled: true, clientId: "silent-client", clientSecret: "silent-secret", robotCode: "ding-silent" },
+			notify: { onlyWhenTakenOver: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserIds: [] },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = silentConfig;
+
+	const module = await import(`../src/index.ts?silent=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localCommands = new Map<string, any>();
+	const localTools = new Map<string, any>();
+	const localNotices: string[] = [];
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+		registerTool: (d: any) => localTools.set(d.name, d),
+	};
+	module.default(localPi);
+	const localCtx: any = { ...ctx, ui: { notify: (m: string) => localNotices.push(m) } };
+
+	await tick(200);
+	const baseline = groupPosts().length;
+	const stopEvent = {
+		type: "session_stop",
+		last_assistant_message: { role: "assistant", content: [{ type: "text", text: "干完了" }] },
+	};
+
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
+	await tick(250);
+	check("未接管时不发启动通知", groupPosts().length === baseline, groupPosts().length - baseline);
+
+	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
+	await tick(250);
+	check("未接管时不发空闲通知", groupPosts().length === baseline, groupPosts().length - baseline);
+
+	// An explicit request from the terminal must still work — otherwise there is
+	// no way to verify the outbound channel while silent.
+	await localCommands.get("dingtalk").handler("test", localCtx);
+	check("静默期间 /dingtalk test 仍然能发", groupPosts().length > baseline, groupPosts().length - baseline);
+
+	const tool = localTools.get("dingtalk_notify");
+	const blocked = await tool.execute("call-silent", { title: "t", message: "m", urgency: "normal" }, undefined, undefined, localCtx);
+	check("未接管时 dingtalk_notify 也被挡住", blocked?.isError === true, blocked?.details);
+	check("并且说明了原因", String(blocked?.content?.[0]?.text ?? "").includes("takeover"), blocked?.content?.[0]?.text);
+
+	const afterTest = groupPosts().length;
+	await localCommands.get("dingtalk").handler("takeover", localCtx);
+	check("接管提示里点明了通知刚开启", String(localNotices.at(-1) ?? "").includes("通知从现在起"), localNotices.at(-1));
+
+	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
+	check("接管后通知恢复", await waitFor(() => groupPosts().length > afterTest), groupPosts().length - afterTest);
+
+	const afterTaken = groupPosts().length;
+	await localCommands.get("dingtalk").handler("release", localCtx);
+	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
+	await tick(250);
+	check("release 之后又静默了", groupPosts().length === afterTaken, groupPosts().length - afterTaken);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[24] onlyWhenTakenOver 却永远无法接管 → 必须告警");
+{
+	// The worst failure mode is silent-forever: it looks like nothing is wrong.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-silent-dead-"));
+	const deadConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		deadConfig,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEADTOKEN" },
+			stream: { enabled: false },
+			notify: { onlyWhenTakenOver: true },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = deadConfig;
+	const { loadConfig } = await import("../src/config.ts");
+	const loaded = loadConfig(dir);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+
+	check(
+		"配置会明确告警「一条通知也不会有」",
+		loaded.warnings.some((w: string) => w.includes("onlyWhenTakenOver") && w.includes("一条通知也不会有")),
+		loaded.warnings,
+	);
+}
+
+console.log("\n[25] 接管锁：同一个钉钉应用只允许一个活着的消费者");
+{
+	// Unit-level on purpose: two live sessions cannot be simulated through the
+	// plugin entrypoint (it holds a per-module singleton), but the lock *is* the
+	// whole cross-session protocol, so it can be driven directly.
+	const { TakeoverLock } = await import("../src/lock.ts");
+	const quiet: any = { debug() {}, info() {}, warn() {}, error() {} };
+	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
+
+	const a = new TakeoverLock("lock-app-1", quiet);
+	const b = new TakeoverLock("lock-app-1", quiet);
+	const other = new TakeoverLock("lock-app-2", quiet);
+
+	const first = a.acquire("D:/proj/alpha");
+	check("首个会话拿到锁", first.ok && !first.previous, first);
+	check("锁文件落在配置的目录里", existsSync(a.path) && a.path.startsWith(lockRoot), a.path);
+	check("锁文件记的是本进程 PID", a.readOwner()?.pid === process.pid, a.readOwner());
+
+	const second = b.acquire("D:/proj/beta");
+	check("第二个会话抢占成功（而不是被拒绝）", second.ok === true, second);
+	check("并且知道被顶掉的是谁", second.previous?.cwd === "D:/proj/alpha", second.previous);
+
+	const stolen = a.heartbeat();
+	check("被抢占者心跳时发现自己已不是持有者", stolen?.cwd === "D:/proj/beta", stolen);
+	check("被抢占后 held 归 false", a.held === false, a.held);
+
+	// The victim must not delete the preemptor's lock on its way out.
+	a.release();
+	check("被抢占者 release 不会删掉新持有者的锁", existsSync(b.path));
+	check("新持有者的锁仍然指向自己", b.readOwner()?.cwd === "D:/proj/beta", b.readOwner());
+
+	const independent = other.acquire("D:/proj/gamma");
+	check("不同 clientId 互不干扰", independent.ok && !independent.previous, independent);
+	check("两个 app 是两个锁文件", a.path !== other.path, [a.path, other.path]);
+	check("另一个 app 的锁不影响本 app", b.readOwner()?.cwd === "D:/proj/beta", b.readOwner());
+
+	// A crash must not lock takeover out forever: a dead PID is reclaimed at once.
+	writeFileSync(
+		other.path,
+		JSON.stringify({ token: "dead", pid: 999_999_999, cwd: "D:/proj/dead", appKeyHint: "x", startedAt: Date.now(), heartbeatAt: Date.now() }),
+	);
+	const reclaimed = other.acquire("D:/proj/gamma2");
+	check("死进程留下的锁被静默回收", reclaimed.ok === true && reclaimed.previous === undefined, reclaimed);
+
+	// Process alive but heartbeat stopped (hung / SIGSTOP'd) — also dead enough.
+	writeFileSync(
+		other.path,
+		JSON.stringify({ token: "stale", pid: process.pid, cwd: "D:/proj/stale", appKeyHint: "x", startedAt: Date.now() - 60_000, heartbeatAt: Date.now() - 60_000 }),
+	);
+	const staleReclaim = other.acquire("D:/proj/gamma3");
+	check("心跳超时的锁也算失效", staleReclaim.ok === true && staleReclaim.previous === undefined, staleReclaim);
+
+	b.release();
+	other.release();
+	check("release 之后锁文件消失", !existsSync(b.path) && !existsSync(other.path));
+}
+
+console.log("\n[26] 多会话抢占：新会话 takeover 覆盖旧会话");
+{
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-preempt-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=PREEMPTTOKEN", secret: "" },
+			stream: { enabled: true, clientId: "preempt-client", clientSecret: "preempt-secret", robotCode: "ding-preempt" },
+			// Deliberately silent-until-takeover: the preemption warning has to be
+			// the one thing that still gets through.
+			notify: { onlyWhenTakenOver: true, turnEnd: { enabled: true, minDurationMs: 0 } },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+
+	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
+	const lockFor = (suffix: string): string | undefined =>
+		readdirSync(lockRoot)
+			.map((f) => join(lockRoot, f))
+			.find((p) => {
+				try {
+					return String(JSON.parse(readFileSync(p, "utf8")).cwd ?? "").endsWith(suffix);
+				} catch {
+					return false;
+				}
+			});
+
+	/** Boot an independent module instance — i.e. a second omp session. */
+	const boot = async (tag: string) => {
+		const module = await import(`../src/index.ts?preempt=${tag}`);
+		const h = new Map<string, Handler[]>();
+		const cmds = new Map<string, any>();
+		const notes: string[] = [];
+		const localPi: any = {
+			...pi,
+			on: (event: string, handler: Handler) => h.set(event, [...(h.get(event) ?? []), handler]),
+			registerCommand: (name: string, options: any) => cmds.set(name, options),
+			registerTool: (definition: any) => tools.set(definition.name, definition),
+		};
+		module.default(localPi);
+		const localCtx: any = { ...ctx, cwd: join(base, tag), ui: { notify: (message: string) => notes.push(message) } };
+		await tick(120);
+		await h.get("session_start")![0]({ type: "session_start" }, localCtx);
+		return { cmds, notes, ctx: localCtx };
+	};
+
+	const socketsBefore = MockSocket.instances.length;
+	const alpha = await boot("alpha");
+	const beta = await boot("beta");
+	check("未执行 takeover 时不建立 Stream 连接", MockSocket.instances.length === socketsBefore, MockSocket.instances.length - socketsBefore);
+
+	await alpha.cmds.get("dingtalk").handler("takeover", alpha.ctx);
+	check("A 接管成功", String(alpha.notes.at(-1) ?? "").includes("钉钉已接管本会话"), alpha.notes.at(-1));
+	check("A 接管后建立了 Stream 连接", await waitFor(() => MockSocket.instances.length > socketsBefore));
+	const socketAlpha = MockSocket.instances.at(-1)!;
+	check("A 的锁文件已写入", Boolean(lockFor("alpha")), readdirSync(lockRoot));
+
+	await beta.cmds.get("dingtalk").handler("takeover", beta.ctx);
+	check("B 接管没有被拒绝", String(beta.notes.at(-1) ?? "").includes("钉钉已接管本会话"), beta.notes.at(-1));
+	check(
+		"B 的提示里点名了被抢的会话",
+		String(beta.notes.at(-1) ?? "").includes("抢占") && String(beta.notes.at(-1) ?? "").includes("alpha"),
+		beta.notes.at(-1),
+	);
+
+	// A must stand down by itself — otherwise both Streams stay live and DingTalk
+	// picks a winner at random.
+	check("A 在心跳周期内自动让位（关闭 Stream）", await waitFor(() => socketAlpha.readyState === 3, 4_000), socketAlpha.readyState);
+	const noticeTitles = groupPosts().map((r) => String(r.body?.markdown?.title ?? ""));
+	check("A 发出了「接管已被抢占」通知", noticeTitles.some((t) => t.includes("已被抢占")), noticeTitles);
+	const preemptionTexts = groupPosts()
+		.filter((r) => String(r.body?.markdown?.title ?? "").includes("已被抢占"))
+		.map((r) => String(r.body?.markdown?.text ?? ""));
+	// A's own notice, not any other section's: the text names the victim's dir.
+	const noticeText = preemptionTexts.find((t) => t.includes("alpha")) ?? "";
+	check("这条通知绕过了「接管前静默」", noticeText.length > 0, preemptionTexts.length);
+	check(
+		"通知点名了抢走的一方和本会话，用户知道发生了什么",
+		noticeText.includes("beta") && noticeText.includes("alpha") && noticeText.includes("已自动释放"),
+		noticeText,
+	);
+
+	// Letting go late must not clobber the new owner.
+	const betaLock = lockFor("beta");
+	check("B 的锁文件存在", Boolean(betaLock), readdirSync(lockRoot));
+	await alpha.cmds.get("dingtalk").handler("release", alpha.ctx);
+	check("A 让位后 release 不会误删 B 的锁", Boolean(betaLock) && existsSync(betaLock!), betaLock);
+	check("锁仍然指向 B 的会话", String(JSON.parse(readFileSync(betaLock!, "utf8")).cwd).endsWith("beta"));
+
+	// Only B is still listening.
+	const socketBeta = MockSocket.instances.at(-1)!;
+	socketBeta.open();
+	socketBeta.system("REGISTERED");
+	const repliesBefore = sessionReplies().length;
+	socketBeta.robot("状态");
+	check("抢占后钉钉消息只到达 B", await waitFor(() => sessionReplies().length > repliesBefore), sessionReplies().length - repliesBefore);
+
+	await beta.cmds.get("dingtalk").handler("release", beta.ctx);
+	check("B release 后锁被清掉", !existsSync(betaLock!), lockFor("beta"));
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[27] 退出清理");
+{
+	const before = MockSocket.instances.length;
+	await fire("session_shutdown", { type: "session_shutdown" });
+	check("session_shutdown 未抛异常", true);
+	check("已建立过连接", MockSocket.instances.length >= before);
+	await tick(150);
+}
+
+// --- summary ----------------------------------------------------------------
+console.log(`\n${"=".repeat(56)}`);
+if (failures.length === 0) {
+	console.log(`全部通过：${passed} 项断言`);
+} else {
+	console.log(`通过 ${passed} 项，失败 ${failures.length} 项：`);
+	for (const name of failures) console.log(`  - ${name}`);
+}
+console.log("=".repeat(56));
+process.exit(failures.length === 0 ? 0 : 1);
