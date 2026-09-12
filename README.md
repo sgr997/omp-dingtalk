@@ -431,19 +431,45 @@ bun run test
 
 ## 10. 分发到其他电脑
 
-**可以直接拷。** 插件是零运行时依赖的——没有 `node_modules`，不需要 `npm install`，代码里也没有硬编码路径或平台特定逻辑（Windows / macOS / Linux 都能跑）。
+**可以直接拷，也可以一键装。** 插件是零运行时依赖的——没有 `node_modules`，不需要 `npm install`，代码里也没有硬编码路径或平台特定逻辑（Windows / macOS / Linux 都能跑）。
 
-### 新电脑上的安装步骤
+### 方式 A：一键安装（推荐）
 
-1. 把整个插件目录拷过去，比如 `~/tools/omp-dingtalk`
-2. 装进 omp：`omp plugin link ~/tools/omp-dingtalk`
-   （Windows 普通用户建不了符号链接时，按第 2 节的 junction 办法处理）
-3. 建**这台机器自己的**配置：
+```bash
+curl -fsSL https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/install.sh | bash
+```
+
+或用 `wget`：
+
+```bash
+wget -qO- https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/install.sh | bash
+```
+
+它会自动：
+1. 下载最新 Release 的 `omp-dingtalk-0.1.0.tar.gz`
+2. 解压到 `~/.local/share/omp-dingtalk`
+3. 执行 `omp plugin link`
+4. 如果 `~/.omp/dingtalk.json` 不存在，从样例复制一份并提示你编辑
+
+装完跑验证：
+
+```bash
+cd ~/.local/share/omp-dingtalk && bun run doctor
+```
+
+### 方式 B：手动拷
+
+1. 下载 Release 资产：
    ```bash
-   mkdir -p ~/.omp && cp ~/tools/omp-dingtalk/config.example.json ~/.omp/dingtalk.json
+   curl -fsSL -o omp-dingtalk.tar.gz \
+     https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/omp-dingtalk-0.1.0.tar.gz
    ```
-   然后填凭据。注意**不要把原机器的 `dingtalk.json` 直接拷过来**——那里面是凭据。
-4. 验证：`cd ~/tools/omp-dingtalk && bun run doctor`
+2. 解压到任意目录，比如 `~/tools/omp-dingtalk`
+3. `omp plugin link ~/tools/omp-dingtalk`
+4. `mkdir -p ~/.omp && cp ~/tools/omp-dingtalk/config.example.json ~/.omp/dingtalk.json`，然后填凭据
+5. `cd ~/tools/omp-dingtalk && bun run doctor`
+
+（Windows 普通用户建不了符号链接时，按第 2 节的 junction 办法处理。）
 
 前提是新电脑已经装了 omp，**并且 omp 配好了模型凭据**——否则插件装了也没有会话可挂。
 
