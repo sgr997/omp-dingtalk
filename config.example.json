@@ -66,6 +66,13 @@
     "rules": []
   },
 
+  "question": {
+    "$comment": "把 omp 的「提问（ask）工具」转发到钉钉：会话里模型问你问题时，不再弹本地对话框，而是推送到钉钉等你在手机上回。仅在接管期间生效（本人在电脑前时照常弹本地框）。",
+    "enabled": true,
+    "timeoutMs": 600000,
+    "$comment_timeoutMs": "多久没回复就告知 omp 自行决定（毫秒，默认 600000 = 10 分钟）。"
+  },
+
   "control": {
     "enabled": true,
     "scope": "direct",

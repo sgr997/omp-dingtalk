@@ -121,6 +121,20 @@ export interface ApprovalConfig {
 	rules: ApprovalRule[];
 }
 
+export interface QuestionConfig {
+	/**
+	 * Forward the agent's `ask` tool to DingTalk instead of letting it open a
+	 * local TUI dialog.
+	 *
+	 * Only takes effect while DingTalk has taken over: if the terminal dialog is
+	 * reachable there is no reason to reroute it. With `control.autoTakeover:
+	 * true` every session is answerable from the phone.
+	 */
+	enabled: boolean;
+	/** How long to wait for a DingTalk reply before telling the agent to move on. */
+	timeoutMs: number;
+}
+
 export interface ControlConfig {
 	/** Accept inbound commands at all. */
 	enabled: boolean;
@@ -164,6 +178,7 @@ export interface DingTalkConfig {
 	outbound: OutboundConfig;
 	notify: NotifyConfig;
 	approval: ApprovalConfig;
+	question: QuestionConfig;
 	control: ControlConfig;
 	/** Runtime mute toggled with `/quiet`. */
 	quiet: boolean;
@@ -239,6 +254,10 @@ const DEFAULTS: DingTalkConfig = {
 		timeoutMs: 300_000,
 		onTimeout: "deny",
 		rules: [],
+	},
+	question: {
+		enabled: true,
+		timeoutMs: 600_000,
 	},
 	control: {
 		enabled: true,
@@ -344,6 +363,15 @@ function envOverrides(): Record<string, any> {
 	if (env.DINGTALK_APPROVAL_MODE) {
 		out.approval = { ...(out.approval ?? {}), mode: env.DINGTALK_APPROVAL_MODE.trim() };
 	}
+	if (env.DINGTALK_QUESTION_ENABLED) {
+		out.question = { ...(out.question ?? {}), enabled: /^(1|true|yes|on)$/i.test(env.DINGTALK_QUESTION_ENABLED.trim()) };
+	}
+	if (env.DINGTALK_QUESTION_TIMEOUT_MS) {
+		const parsed = Number(env.DINGTALK_QUESTION_TIMEOUT_MS.trim());
+		if (Number.isFinite(parsed) && parsed > 0) {
+			out.question = { ...(out.question ?? {}), timeoutMs: parsed };
+		}
+	}
 	if (env.DINGTALK_CONTROL_SCOPE) {
 		out.control = { ...(out.control ?? {}), scope: env.DINGTALK_CONTROL_SCOPE.trim() };
 	}
@@ -383,6 +411,12 @@ export function loadConfig(cwd: string): LoadedConfig {
 	config.stream.clientSecret = String(config.stream.clientSecret ?? "").trim();
 	config.stream.robotCode = String(config.stream.robotCode ?? "").trim();
 	config.approval.rules = Array.isArray(config.approval.rules) ? config.approval.rules : [];
+	config.question.enabled = config.question.enabled !== false;
+	const rawQuestionTimeout = config.question.timeoutMs as unknown;
+	if (typeof rawQuestionTimeout !== "number" || !Number.isFinite(rawQuestionTimeout) || rawQuestionTimeout <= 0) {
+		warnings.push("question.timeoutMs 无效，已回退为 600000（10 分钟）。");
+		config.question.timeoutMs = 600_000;
+	}
 	config.control.allowUserIds = (Array.isArray(config.control.allowUserIds) ? config.control.allowUserIds : [])
 		.map((id) => String(id).trim())
 		.filter(Boolean);
@@ -481,6 +515,7 @@ export function describeConfig(loaded: LoadedConfig): string[] {
 		`控制范围: ${SCOPE_LABELS[config.control.scope] ?? config.control.scope}`,
 		`接管方式: ${config.control.autoTakeover ? "会话启动时自动接管" : "需在会话内执行 /dingtalk takeover"}`,
 		`审批模式: ${config.approval.mode}`,
+	`远程提问: ${config.question.enabled ? `已启用（超时 ${Math.round(config.question.timeoutMs / 1000)}s）` : "已关闭"}`,
 		`指令白名单: ${config.control.allowUserIds.length ? config.control.allowUserIds.join(", ") : "(空 — 任何能触达机器人的人都可控制)"}`,
 		`静音: ${config.quiet ? "是" : "否"}`,
 		`接管前静默: ${config.notify.onlyWhenTakenOver ? "是（接管后才开始发通知）" : "否"}`,

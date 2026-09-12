@@ -160,6 +160,141 @@ export function fmtApprovalResolved(info: { id: string; approved: boolean; by: s
 	};
 }
 
+type QuestionPack = {
+	id: string;
+	questions: Array<{
+		id: string;
+		question: string;
+		header?: string;
+		options: Array<{ label: string; description?: string }>;
+		multi: boolean;
+		recommended?: number;
+	}>;
+	timeoutMs: number;
+};
+
+function optionLines(pack: QuestionPack): string[] {
+	const lines: string[] = [];
+	pack.questions.forEach((q, qIndex) => {
+		if (pack.questions.length > 1) lines.push(`**${qIndex + 1}. ${truncate(q.question, 400)}**`);
+		else lines.push(`**${truncate(q.question, 400)}**`);
+		if (q.header?.trim()) lines.push(`> ${truncate(q.header.trim(), 200)}`);
+		if (q.options.length > 0) {
+			q.options.forEach((o, oIndex) => {
+				const recommended = q.recommended === oIndex ? "（推荐）" : "";
+				lines.push(
+					`${qIndex + 1}.${oIndex + 1} ${truncate(o.label, 200)}${recommended}${
+						o.description ? ` — ${truncate(o.description, 200)}` : ""
+					}`,
+				);
+			});
+		}
+		lines.push("");
+	});
+	return lines;
+}
+
+export function fmtQuestionRequest(pack: QuestionPack): Message {
+	const multiple = pack.questions.length > 1;
+	const lines = [
+		`## ❓ 需要你的回答`,
+		``,
+		`- **编号**: \`${pack.id}\``,
+		...(sessionTag ? [originLine()] : []),
+		``,
+		...optionLines(pack),
+		`直接在钉钉里回复即可。`,
+	];
+	if (multiple) {
+		lines.push(
+			`多问题用「问题号:选项号」逐条回答，如 \`1:2 2:1\`；多选选项用逗号分隔，如 \`1:2,3\`。`,
+			`也可以回文字作为自定义答案。`,
+		);
+	} else {
+		lines.push(`回复选项号（如 \`2\`）、多选用 \`2,4\`，或直接回文字作为自定义答案。`);
+	}
+	lines.push(`> ${Math.round(pack.timeoutMs / 1000)}s 内没有回复会告知 omp 自行决定。`);
+	return { title: `需要你的回答 ${pack.id}`, text: lines.join("\n") };
+}
+
+export function fmtQuestionAnswerEcho(info: {
+	id: string;
+	items: Array<{ id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }>;
+	by: string;
+}): Message {
+	const renderItem = (item: { id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }): string => {
+		const question = `**${truncate(item.question, 300)}**`;
+		if (item.customInput !== undefined) return `${question}\n> 自定义回答：${truncate(item.customInput, 500)}`;
+		if (item.selectedOptions.length === 0) return `${question}\n> （未选择任何选项）`;
+		return `${question}\n> 已选：${item.selectedOptions.map((o) => `\`${truncate(o, 120)}\``).join("、")}`;
+	};
+	return {
+		title: `✅ 已回答 ${info.id}`,
+		text: [`**回答已提交给 omp**`, ``, `- **编号**: \`${info.id}\``, `- **操作人**: ${info.by}`, ``, ...info.items.map(renderItem)].join("\n"),
+	};
+}
+
+export function fmtQuestionTimeout(info: { id: string; questions: QuestionPack["questions"]; timeoutMs: number }): Message {
+	return {
+		title: `⏰ 提问超时 ${info.id}`,
+		text: [
+			`**${Math.round(info.timeoutMs / 1000)}s 内没有收到回答**`,
+			``,
+			`- **编号**: \`${info.id}\``,
+			...(sessionTag ? [originLine()] : []),
+			``,
+			...info.questions.map((q, qi) => `${qi + 1}. ${truncate(q.question, 300)}`),
+			``,
+			`已告知 omp 自行决定，任务不会卡住。`,
+		].join("\n"),
+	};
+}
+
+/**
+ * The user message injected into the session when a remote question is
+ * answered — the model never saw the original `ask` dialog, so the answer has
+ * to carry the question text with it.
+ */
+export function formatQuestionInjection(info: {
+	id: string;
+	items: Array<{ id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }>;
+	by?: string;
+}): string {
+	const lines = [
+		`（钉钉远程回答，提问 #${info.id}${info.by ? `，来自 ${info.by}` : ""}）`,
+	];
+	for (const item of info.items) {
+		lines.push(`- 问题「${item.question}」`);
+		if (item.customInput !== undefined) {
+			lines.push(`  自定义回答：${item.customInput}`);
+		} else if (item.selectedOptions.length > 0) {
+			lines.push(`  选择：${item.selectedOptions.join("、")}`);
+		} else {
+			lines.push(`  未选择任何选项`);
+		}
+	}
+	return lines.join("\n");
+}
+
+/** Tells the model an ask it made was forwarded and that it should stop and wait. */
+export function fmtQuestionBlocked(info: { id: string; questions: QuestionPack["questions"]; timeoutMs: number }): string {
+	const lines = [
+		`提问已推送到钉钉（编号 ${info.id}），用户现在不在本机，正在手机上回答。`,
+		``,
+	];
+	info.questions.forEach((q, qi) => {
+		lines.push(
+			`${qi + 1}. ${q.question}${q.multi ? "（多选）" : ""}${q.recommended !== undefined ? `（推荐第 ${q.recommended + 1} 项）` : ""}`,
+		);
+	});
+	lines.push(
+		``,
+		`请**立即结束本轮**，不要假装用户已作答，不要再次调用提问工具。`,
+		`用户的回答会在 ${Math.round((info.timeoutMs ?? 600_000) / 1000)}s 内以一条新的用户消息发来；超时未收到会让你自行决定。`,
+	);
+	return lines.join("\n");
+}
+
 export function fmtError(info: { kind: string; detail: string; hint?: string }): Message {
 	const lines = [`## ⚠️ ${info.kind}`, ``];
 	if (sessionTag) lines.push(originLine(), ``);
@@ -211,6 +346,10 @@ export function fmtHelp(): Message {
 		`- \`同意\` / \`/approve [编号]\` — 批准（不写编号则批准最新一条）`,
 		`- \`拒绝\` / \`/deny [编号]\` — 拒绝`,
 		``,
+		`**远程提问**`,
+		`- 收到“❓ 需要你的回答”后直接回复选项号（如 \`2\`），多选 \`2,4\`，也可回文字`,
+		`- 多问题用 \`1:2 2:1\` 逐条回答；数字在钉钉里必须单独发送`,
+		``,
 		`**通知开关**`,
 		`- \`/quiet on\` / \`/quiet off\` — 静音 / 恢复通知`,
 		`- \`/ping\` — 测试连通性`,
@@ -222,12 +361,19 @@ export function fmtHelp(): Message {
 export function fmtStatus(info: {
 	lines: string[];
 	pending: { id: string; toolName: string; ageMs: number }[];
+	pendingQuestions: { id: string; text: string; ageMs: number }[];
 }): Message {
 	const out = [`## 📊 omp 状态`, ``, ...info.lines];
 	if (info.pending.length > 0) {
 		out.push(``, `**待审批**`);
 		for (const item of info.pending) {
 			out.push(`- \`${item.id}\` \`${item.toolName}\` (等待 ${humanDuration(item.ageMs)})`);
+		}
+	}
+	if (info.pendingQuestions.length > 0) {
+		out.push(``, `**待回答提问**`);
+		for (const item of info.pendingQuestions) {
+			out.push(`- \`${item.id}\` ${truncate(item.text, 120)} (等待 ${humanDuration(item.ageMs)})`);
 		}
 	}
 	return { title: "omp 状态", text: out.join("\n") + footer() };

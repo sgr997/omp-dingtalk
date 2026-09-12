@@ -125,6 +125,10 @@ const webhookPosts = () => requests.filter((r) => r.url.includes("oapi.dingtalk.
 const sessionReplies = () => requests.filter((r) => r.url.includes("sendBySession"));
 const approvalPosts = () =>
 	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("需要批准"));
+const questionPosts = () =>
+	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("需要你的回答"));
+const questionTimeoutPosts = () =>
+	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("提问超时"));
 
 // `webhookPosts()` also matches `sendBySession` replies, which is fine for the
 // older assertions but too loose for "did this go to the group". `groupPosts()`
@@ -411,6 +415,203 @@ console.log("\n[9] 普通命令不应被拦截");
 	check("安全命令直接放行", result === undefined, result);
 }
 
+console.log("\n[9.1] 远程提问：ask 工具转发到钉钉，回复即可作答");
+{
+	// The model's only question mechanism is the `ask` tool, which opens a
+	// local dialog and blocks the turn. While DingTalk drives the session that
+	// dialog is unreachable, so the call must be blocked and rerouted.
+	const single = {
+		id: "q1",
+		question: "要部署到生产吗？",
+		options: [{ label: "立即部署" }, { label: "先等等", description: "明天再说" }],
+		recommended: 0,
+	};
+	const pending = fire("tool_call", {
+		type: "tool_call",
+		toolCallId: "t-ask-single",
+		toolName: "ask",
+		input: { questions: [single] },
+	});
+	check("提问推送到了钉钉", await waitFor(() => questionPosts().length >= 1), questionPosts().length);
+	const askText = String(questionPosts().at(-1)?.body?.markdown?.text ?? "");
+	check("推送里带上了问题原文", askText.includes("要部署到生产吗"));
+	check("推送里列出了编号选项", askText.includes("1.1 立即部署") && askText.includes("1.2 先等等"), askText);
+	check("推送里标出了推荐项", askText.includes("（推荐）"), askText);
+	const [askResult] = await pending;
+	check("ask 被拦截（本地对话框不会挂起轮次）", askResult?.block === true, askResult);
+	check("拦截原因告诉模型去钉钉等", String(askResult?.reason ?? "").includes("钉钉") && String(askResult?.reason ?? "").includes("结束本轮"), askResult?.reason);
+
+	// Same question asked again while still pending: one push, one id.
+	const dupBefore = questionPosts().length;
+	const dup = await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-dup", toolName: "ask", input: { questions: [single] } });
+	await tick(150);
+	check("同一问题重复提问不会重复推送", questionPosts().length === dupBefore, questionPosts().length - dupBefore);
+	check("重复提问复用了同一编号", String(dup[0]?.reason ?? "") === String(askResult?.reason ?? ""), dup[0]?.reason);
+
+	// Reply by option number — settles the original pending entry.
+	const beforeInject = sentPrompts.length;
+	live.robot("1");
+	check(
+		"回复选项号后注入会话",
+		await waitFor(() => sentPrompts.length > beforeInject),
+		sentPrompts.length - beforeInject,
+	);
+	check(
+		"注入文本带上问题与所选选项",
+		String(sentPrompts.at(-1)?.text ?? "").includes("要部署到生产吗") && String(sentPrompts.at(-1)?.text ?? "").includes("立即部署"),
+		sentPrompts.at(-1)?.text,
+	);
+	check("投递方式为 steer（立刻续跑）", sentPrompts.at(-1)?.options?.deliverAs === "steer", sentPrompts.at(-1)?.options);
+	check(
+		"回了确认消息",
+		String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("已回答"),
+		String(sessionReplies().at(-1)?.body?.markdown?.title ?? ""),
+	);
+
+	// Reply by option label.
+	const second = {
+		id: "q2",
+		question: "用哪个数据库？",
+		options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+	};
+	await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-label", toolName: "ask", input: { questions: [second] } });
+	const beforeLabel = sentPrompts.length;
+	live.robot("PostgreSQL");
+	check("回复选项文字也能作答", await waitFor(() => sentPrompts.length > beforeLabel));
+	check("按标签匹配到正确选项", String(sentPrompts.at(-1)?.text ?? "").includes("PostgreSQL"), sentPrompts.at(-1)?.text);
+
+	// Free text becomes the custom answer.
+	const third = { id: "q3", question: "还有别的偏好吗？", options: [{ label: "没有" }] };
+	await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-custom", toolName: "ask", input: { questions: [third] } });
+	const beforeCustom = sentPrompts.length;
+	live.robot("别动线上数据");
+	check("非编号非选项的文字按自定义回答处理", await waitFor(() => sentPrompts.length > beforeCustom));
+	check("自定义回答原文进了注入", String(sentPrompts.at(-1)?.text ?? "").includes("别动线上数据"), sentPrompts.at(-1)?.text);
+}
+
+console.log("\n[9.2] 远程提问：多选与多问题");
+{
+	const multi = {
+		id: "m1",
+		question: "包含哪些目标？",
+		multi: true,
+		options: [{ label: "Windows" }, { label: "macOS" }, { label: "Linux" }],
+	};
+	await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-multi", toolName: "ask", input: { questions: [multi] } });
+	const before = sentPrompts.length;
+	live.robot("1,3");
+	check("多选按逗号作答", await waitFor(() => sentPrompts.length > before));
+	check(
+		"多选答案包含两项",
+		String(sentPrompts.at(-1)?.text ?? "").includes("Windows") && String(sentPrompts.at(-1)?.text ?? "").includes("Linux"),
+		sentPrompts.at(-1)?.text,
+	);
+
+	const many = [
+		{ id: "a", question: "部署到哪？", options: [{ label: "staging" }, { label: "prod" }] },
+		{ id: "b", question: "几点发？", options: [{ label: "现在" }, { label: "凌晨" }] },
+	];
+	await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-many", toolName: "ask", input: { questions: many } });
+	check("多问题推送里按 n.m 编号", String(questionPosts().at(-1)?.body?.markdown?.text ?? "").includes("2.2 凌晨"), questionPosts().at(-1)?.body?.markdown?.text);
+
+	// A bare `1` is ambiguous → must be rejected with the format hint.
+	const repliesBefore = sessionReplies().length;
+	live.robot("1");
+	check("多问题时裸编号被拒绝", await waitFor(() => sessionReplies().length > repliesBefore));
+	check("拒绝信息给出格式提示", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("问题号:选项号"), sessionReplies().at(-1)?.body?.markdown?.text);
+
+	const beforeMany = sentPrompts.length;
+	live.robot("1:2 2:1");
+	check("多问题按 n:选项 逐条作答", await waitFor(() => sentPrompts.length > beforeMany));
+	const manyText = String(sentPrompts.at(-1)?.text ?? "");
+	check("两条回答都注入了", manyText.includes("prod") && manyText.includes("现在"), manyText);
+}
+
+console.log("\n[9.3] 远程提问：超时后告知 omp 自行决定");
+{
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-question-timeout-"));
+	const timeoutConfig = join(dir, "dingtalk.json");
+	writeFileSync(timeoutConfig, JSON.stringify({ ...MAIN_CONFIG, question: { enabled: true, timeoutMs: 300 }, stream: { ...MAIN_CONFIG.stream, clientId: "smoke-client-qt" } }));
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = timeoutConfig;
+
+	const module = await import(`../src/index.ts?qtimeout=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	// Keep the local module's registrations out of the shared maps — otherwise a
+	// later section would drive *this* bridge (its own lazy `ensure`) instead of
+	// the main one.
+	const localCommands = new Map<string, any>();
+	const localTools = new Map<string, any>();
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+		registerTool: (definition: any) => localTools.set(definition.name, definition),
+	};
+	module.default(localPi);
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+
+	const before = sentPrompts.length;
+	const gate = localHandlers.get("tool_call")![0];
+	const outcome = await gate(
+		{
+			type: "tool_call",
+			toolCallId: "t-ask-timeout",
+			toolName: "ask",
+			input: { questions: [{ id: "t1", question: "现在继续吗？", options: [{ label: "继续" }, { label: "停" }], recommended: 0 }] },
+		},
+		ctx,
+	);
+	check("超时场景下 ask 同样被拦截", outcome?.block === true, outcome);
+	// The registry clamps to a 5s floor, so this waits a real 5s.
+	check(
+		"超时后注入“自行决定”提示",
+		await waitFor(() => sentPrompts.length > before && String(sentPrompts.at(-1)?.text ?? "").includes("未收到回答"), 9_000),
+		sentPrompts.at(-1)?.text,
+	);
+	check(
+		"超时后提示里带上推荐项",
+		String(sentPrompts.at(-1)?.text ?? "").includes("继续"),
+		sentPrompts.at(-1)?.text,
+	);
+	check(
+		"超时也发了钉钉通知",
+		await waitFor(() => questionTimeoutPosts().length >= 1),
+		questionTimeoutPosts().length,
+	);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[9.4] 远程提问：关掉开关或没接管就不拦截");
+{
+	// question.enabled = false → the native TUI dialog must be left alone.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-question-off-"));
+	const offConfig = join(dir, "dingtalk.json");
+	writeFileSync(offConfig, JSON.stringify({ ...MAIN_CONFIG, question: { enabled: false, timeoutMs: 60_000 }, stream: { ...MAIN_CONFIG.stream, clientId: "smoke-client-qoff" } }));
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = offConfig;
+
+	const module = await import(`../src/index.ts?qoff=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localCommands = new Map<string, any>();
+	const localTools = new Map<string, any>();
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+		registerTool: (definition: any) => localTools.set(definition.name, definition),
+	};
+	module.default(localPi);
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+	const gate = localHandlers.get("tool_call")![0];
+	const outcome = await gate(
+		{ type: "tool_call", toolCallId: "t-ask-off", toolName: "ask", input: { questions: [{ id: "q", question: "?", options: [{ label: "a" }] }] } },
+		ctx,
+	);
+	check("question.enabled=false 时不拦截", outcome === undefined, outcome);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
 console.log("\n[10] 自由文本 → 注入会话，且不会误判为指令");
 {
 	const before = sentPrompts.length;
@@ -588,6 +789,11 @@ console.log("\n[18] 未接管时审批闸门必须让路");
 	const gate = localHandlers.get("tool_call")![0];
 	const outcome = await gate({ type: "tool_call", toolCallId: "t-inert", toolName: "bash", input: { command: "rm -rf /" } }, ctx);
 	check("未接管时不拦截（否则每条危险命令都要等到超时）", outcome === undefined, outcome);
+	const askOutcome = await gate(
+		{ type: "tool_call", toolCallId: "t-inert-ask", toolName: "ask", input: { questions: [{ id: "q", question: "?", options: [{ label: "a" }] }] } },
+		ctx,
+	);
+	check("未接管时 ask 也不拦截（本地对话框照常）", askOutcome === undefined, askOutcome);
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 

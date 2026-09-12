@@ -7,8 +7,9 @@
  */
 import type { DingTalkConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
-import { fmtHelp, fmtQuiet, fmtStatus, fmtText, type Message } from "./format";
+import { fmtHelp, fmtQuestionAnswerEcho, fmtQuiet, fmtStatus, fmtText, formatQuestionInjection, type Message } from "./format";
 import type { Logger } from "./logger";
+import { QuestionRegistry } from "./questions";
 import { robotMessageText, type RobotMessage } from "./stream";
 import { humanDuration, shortId, truncate } from "./util";
 
@@ -148,6 +149,7 @@ export interface RouterDeps {
 	log: Logger;
 	sender: DingTalkSender;
 	approvals: ApprovalRegistry;
+	questions: QuestionRegistry;
 	pi: ApiLike;
 	getCtx: () => CtxLike | undefined;
 	/** Extra lines for `/status` supplied by the extension entrypoint. */
@@ -260,6 +262,10 @@ export class CommandRouter {
 				case "follow":
 					await this.#handlePrompt(message, rest, "followUp");
 					return;
+				case "answer":
+				case "回答":
+					await this.#handleAnswer(message, rest);
+					return;
 				case "compact":
 					await this.#handleCompact(message, rest);
 					return;
@@ -277,6 +283,13 @@ export class CommandRouter {
 					return;
 				default:
 					break;
+			}
+
+			// While a remote question is pending, plain text answers it — the ask
+			// dialog is the thing blocking the agent, so that outranks a new prompt.
+			if (this.#deps.questions.size > 0) {
+				await this.#handleAnswer(message, text);
+				return;
 			}
 
 			// Anything else is a prompt for the agent.
@@ -333,7 +346,18 @@ export class CommandRouter {
 			`- **静音**: ${this.#deps.isQuiet() ? "是" : "否"}`,
 			...this.#deps.statusLines(),
 		];
-		await this.#reply(message, fmtStatus({ lines, pending: this.#deps.approvals.list().map((a) => ({ id: a.id, toolName: a.toolName, ageMs: Date.now() - a.createdAt })) }));
+		await this.#reply(
+			message,
+			fmtStatus({
+				lines,
+				pending: this.#deps.approvals.list().map((a) => ({ id: a.id, toolName: a.toolName, ageMs: Date.now() - a.createdAt })),
+				pendingQuestions: this.#deps.questions.list().map((q) => ({
+					id: q.id,
+					text: q.questions[0]?.question ?? "(无内容)",
+					ageMs: Date.now() - q.createdAt,
+				})),
+			}),
+		);
 	}
 
 	async #handleTools(message: RobotMessage): Promise<void> {
@@ -342,6 +366,41 @@ export class CommandRouter {
 			message,
 			fmtText(`🧰 当前启用 ${tools.length} 个工具`, tools.map((t) => `- \`${t}\``).join("\n") || "(无)"),
 		);
+	}
+
+	async #handleAnswer(message: RobotMessage, raw: string): Promise<void> {
+		const questions = this.#deps.questions;
+		if (questions.size === 0) {
+			await this.#reply(message, fmtText("ℹ️ 当前没有待回答的提问", "收到“❓ 需要你的回答”时直接回复选项号即可。"));
+			return;
+		}
+
+		// `/answer <编号> <内容>` lets you target a specific pending question.
+		let text = String(raw ?? "").trim();
+		let target: string | undefined;
+		const first = text.split(/\s+/)[0]?.toUpperCase();
+		if (first && questions.list().some((q) => q.id === first)) {
+			target = first;
+			text = text.slice(first.length).trim();
+		}
+
+		const senderId = message.senderStaffId || message.senderId || "";
+		const by = message.senderNick || senderId || "?";
+		const result = questions.resolve(target, text, by);
+		if (!result.ok) {
+			await this.#reply(message, fmtText("⚠️ 无法记录回答", result.error ?? ""));
+			return;
+		}
+
+		const { answer } = result;
+		this.#deps.log.info(`远程提问 ${answer.id} 已回答`, { items: answer.items.length, from: by });
+		await this.#reply(message, fmtQuestionAnswerEcho({ id: answer.id, items: answer.items, by }));
+
+		// Deliver the answer as a fresh user message so the model continues with
+		// the question and answer both in context.
+		this.#deps.pi.sendUserMessage(formatQuestionInjection({ id: answer.id, items: answer.items, by }), {
+			deliverAs: "steer",
+		});
 	}
 
 	async #handlePrompt(message: RobotMessage, text: string, delivery: "steer" | "followUp"): Promise<void> {
