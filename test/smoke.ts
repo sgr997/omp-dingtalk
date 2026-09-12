@@ -435,7 +435,8 @@ console.log("\n[9.1] 远程提问：ask 工具转发到钉钉，回复即可作�
 	check("提问推送到了钉钉", await waitFor(() => questionPosts().length >= 1), questionPosts().length);
 	const askText = String(questionPosts().at(-1)?.body?.markdown?.text ?? "");
 	check("推送里带上了问题原文", askText.includes("要部署到生产吗"));
-	check("推送里列出了编号选项", askText.includes("1.1 立即部署") && askText.includes("1.2 先等等"), askText);
+	check("推送里列出了编号选项", askText.includes("1. 立即部署 （推荐）") && askText.includes("2. 先等等"), askText);
+	check("选项描述换行显示", askText.includes("明天再说"), askText);
 	check("推送里标出了推荐项", askText.includes("（推荐）"), askText);
 	const [askResult] = await pending;
 	check("ask 被拦截（本地对话框不会挂起轮次）", askResult?.block === true, askResult);
@@ -512,7 +513,7 @@ console.log("\n[9.2] 远程提问：多选与多问题");
 		{ id: "b", question: "几点发？", options: [{ label: "现在" }, { label: "凌晨" }] },
 	];
 	await fire("tool_call", { type: "tool_call", toolCallId: "t-ask-many", toolName: "ask", input: { questions: many } });
-	check("多问题推送里按 n.m 编号", String(questionPosts().at(-1)?.body?.markdown?.text ?? "").includes("2.2 凌晨"), questionPosts().at(-1)?.body?.markdown?.text);
+	check("多问题推送里按问题编号分段", String(questionPosts().at(-1)?.body?.markdown?.text ?? "").includes("**问题 2/2**") && String(questionPosts().at(-1)?.body?.markdown?.text ?? "").includes("2. 凌晨"), questionPosts().at(-1)?.body?.markdown?.text);
 
 	// A bare `1` is ambiguous → must be rejected with the format hint.
 	const repliesBefore = sessionReplies().length;

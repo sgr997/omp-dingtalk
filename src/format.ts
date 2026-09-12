@@ -173,29 +173,42 @@ type QuestionPack = {
 	timeoutMs: number;
 };
 
+/**
+ * DingTalk markdown quirk: two adjacent plain-text lines are rendered as ONE
+ * paragraph (a single newline is a soft break). Only list items, blockquotes
+ * and blank-line paragraph breaks produce a visible line break, so every block
+ * below is either a bullet / ordered-list item, a quote, or separated by an
+ * empty line. Do not "simplify" this by joining plain lines with "\n".
+ */
 function optionLines(pack: QuestionPack): string[] {
 	const lines: string[] = [];
+	const multiple = pack.questions.length > 1;
 	pack.questions.forEach((q, qIndex) => {
-		if (pack.questions.length > 1) lines.push(`**${qIndex + 1}. ${truncate(q.question, 400)}**`);
-		else lines.push(`**${truncate(q.question, 400)}**`);
-		if (q.header?.trim()) lines.push(`> ${truncate(q.header.trim(), 200)}`);
+		const label = multiple ? `**问题 ${qIndex + 1}/${pack.questions.length}**` : `**问题**`;
+		lines.push(label, ``, `${truncate(q.question, 400)}`, ``);
+		if (q.header?.trim()) lines.push(`> ${truncate(q.header.trim(), 200)}`, ``);
 		if (q.options.length > 0) {
+			// A real markdown ordered list: DingTalk renders the numbers itself and
+			// keeps every option on its own line.
 			q.options.forEach((o, oIndex) => {
-				const recommended = q.recommended === oIndex ? "（推荐）" : "";
+				const recommended = q.recommended === oIndex ? " （推荐）" : "";
 				lines.push(
-					`${qIndex + 1}.${oIndex + 1} ${truncate(o.label, 200)}${recommended}${
-						o.description ? ` — ${truncate(o.description, 200)}` : ""
+					`${oIndex + 1}. ${truncate(o.label, 200)}${recommended}${
+						o.description ? `\n   ${truncate(o.description, 200)}` : ""
 					}`,
 				);
 			});
+			lines.push(``);
 		}
-		lines.push("");
 	});
 	return lines;
 }
 
 export function fmtQuestionRequest(pack: QuestionPack): Message {
 	const multiple = pack.questions.length > 1;
+	const howTo = multiple
+		? `回复「问题号:选项号」，如 \`1:2 2:1\`；同一问题多选用 \`1:2,3\`。也可以直接回选项文字或自定义答案。`
+		: `直接回复选项号即可，如 \`2\`；多选用 \`2,4\`；回选项文字或任意文字也可以。`;
 	const lines = [
 		`## ❓ 需要你的回答`,
 		``,
@@ -203,17 +216,10 @@ export function fmtQuestionRequest(pack: QuestionPack): Message {
 		...(sessionTag ? [originLine()] : []),
 		``,
 		...optionLines(pack),
-		`直接在钉钉里回复即可。`,
+		howTo,
+		``,
+		`> ${Math.round(pack.timeoutMs / 1000)}s 内没有回复会告知 omp 自行决定。`,
 	];
-	if (multiple) {
-		lines.push(
-			`多问题用「问题号:选项号」逐条回答，如 \`1:2 2:1\`；多选选项用逗号分隔，如 \`1:2,3\`。`,
-			`也可以回文字作为自定义答案。`,
-		);
-	} else {
-		lines.push(`回复选项号（如 \`2\`）、多选用 \`2,4\`，或直接回文字作为自定义答案。`);
-	}
-	lines.push(`> ${Math.round(pack.timeoutMs / 1000)}s 内没有回复会告知 omp 自行决定。`);
 	return { title: `需要你的回答 ${pack.id}`, text: lines.join("\n") };
 }
 
@@ -222,15 +228,18 @@ export function fmtQuestionAnswerEcho(info: {
 	items: Array<{ id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }>;
 	by: string;
 }): Message {
-	const renderItem = (item: { id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }): string => {
-		const question = `**${truncate(item.question, 300)}**`;
-		if (item.customInput !== undefined) return `${question}\n> 自定义回答：${truncate(item.customInput, 500)}`;
-		if (item.selectedOptions.length === 0) return `${question}\n> （未选择任何选项）`;
-		return `${question}\n> 已选：${item.selectedOptions.map((o) => `\`${truncate(o, 120)}\``).join("、")}`;
+	const renderItem = (item: { id: string; question: string; options: string[]; multi: boolean; selectedOptions: string[]; customInput?: string }): string[] => {
+		// Blank line between the question and the answer: adjacent plain lines
+		// would render as one paragraph.
+		const head = [`**${truncate(item.question, 300)}**`, ``];
+		if (item.customInput !== undefined) return [...head, `> 自定义回答：${truncate(item.customInput, 500)}`];
+		if (item.selectedOptions.length === 0) return [...head, `> （未选择任何选项）`];
+		return [...head, `> 已选：${item.selectedOptions.map((o) => `\`${truncate(o, 120)}\``).join("、")}`];
 	};
+	const body = info.items.flatMap((item, index) => (index === 0 ? renderItem(item) : ["", ...renderItem(item)]));
 	return {
 		title: `✅ 已回答 ${info.id}`,
-		text: [`**回答已提交给 omp**`, ``, `- **编号**: \`${info.id}\``, `- **操作人**: ${info.by}`, ``, ...info.items.map(renderItem)].join("\n"),
+		text: [`**回答已提交给 omp**`, ``, `- **编号**: \`${info.id}\``, `- **操作人**: ${info.by}`, ``, ...body].join("\n"),
 	};
 }
 
@@ -243,7 +252,7 @@ export function fmtQuestionTimeout(info: { id: string; questions: QuestionPack["
 			`- **编号**: \`${info.id}\``,
 			...(sessionTag ? [originLine()] : []),
 			``,
-			...info.questions.map((q, qi) => `${qi + 1}. ${truncate(q.question, 300)}`),
+			...info.questions.flatMap((q, qi) => [`${qi + 1}. ${truncate(q.question, 300)}`]),
 			``,
 			`已告知 omp 自行决定，任务不会卡住。`,
 		].join("\n"),
