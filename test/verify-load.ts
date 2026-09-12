@@ -31,12 +31,24 @@ function check(name: string, condition: boolean, extra?: unknown): void {
 
 /** Locate the installed OMP package so its loader can be imported directly. */
 function findPackageDir(): string | undefined {
-	const candidates = [
-		process.env.OMP_PACKAGE_DIR,
-		join(homeDir(), ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent"),
-		join(process.cwd(), "node_modules", "@oh-my-pi", "pi-coding-agent"),
-	].filter((value): value is string => Boolean(value));
-	return candidates.find((dir) => existsSync(join(dir, "package.json")));
+	// `OMP_PACKAGE_DIR` points straight at a package directory.
+	const explicit = process.env.OMP_PACKAGE_DIR;
+	if (explicit && existsSync(join(explicit, "package.json"))) return explicit;
+
+	// `pi-coding-agent-zh` is the same loader shipped under the zh package name.
+	const names = ["pi-coding-agent", "pi-coding-agent-zh"];
+	const roots = [
+		join(homeDir(), ".bun", "install", "global", "node_modules"),
+		join(homeDir(), "node_modules"),
+		join(process.cwd(), "node_modules"),
+	];
+	for (const root of roots) {
+		for (const name of names) {
+			const dir = join(root, "@oh-my-pi", name);
+			if (existsSync(join(dir, "package.json"))) return dir;
+		}
+	}
+	return undefined;
 }
 
 const packageDir = findPackageDir();
