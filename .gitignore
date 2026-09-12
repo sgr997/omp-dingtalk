@@ -1,0 +1,18 @@
+# Build artifacts / distribution
+*.tar.gz
+
+# Lock files from live runs (should never be committed)
+*.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
