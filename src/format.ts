@@ -5,7 +5,7 @@
  * quotes, lists, links and fenced code, but nothing exotic.
  */
 import type { ApprovalRule } from "./config";
-import { fenceSafe, humanDuration, truncate } from "./util";
+import { fenceSafe, humanDuration, truncate, truncatePath } from "./util";
 
 export interface Message {
 	title: string;
@@ -81,7 +81,7 @@ export function fmtSessionStart(info: {
 	const lines = [
 		`## 🚀 omp 已启动`,
 		``,
-		`- **目录**: \`${truncate(info.cwd, 120)}\``,
+		`- **目录**: \`${truncatePath(info.cwd, 120)}\``,
 		`- **模型**: ${info.model ? `\`${info.model}\`` : "(未知)"}`,
 	];
 	if (info.sessionName) lines.push(`- **会话**: ${truncate(info.sessionName, 80)}`);

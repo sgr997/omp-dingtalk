@@ -25,6 +25,23 @@ export function truncate(text: unknown, max: number): string {
 	return `${value.slice(0, max - 1)}…`;
 }
 
+/**
+ * Truncate a filesystem path while keeping its last segment visible.
+ *
+ * Plain `truncate` keeps the head, so a long path loses the project/session
+ * name — exactly the part that tells the user *which* directory is speaking.
+ */
+export function truncatePath(path: unknown, max: number): string {
+	const value = typeof path === "string" ? path : path == null ? "" : String(path);
+	if (value.length <= max) return value;
+	if (max <= 1) return value.slice(0, Math.max(0, max));
+	const segments = value.split(/[\\/]/).filter(Boolean);
+	const tail = segments.length > 1 ? (segments.at(-1) ?? "") : "";
+	if (!tail || tail.length + 2 >= max) return truncate(value, max);
+	const head = value.slice(0, max - tail.length - 2);
+	return `${head}…${tail}`.slice(0, max);
+}
+
 export function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
