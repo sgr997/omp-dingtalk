@@ -1008,7 +1008,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
 						: "";
 					const stolen = result.preempted
-						? ` 已从另一个会话手里抢占（\`${truncatePath(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}），它会在 ${Math.round(heartbeatMs() / 1000)} 秒内自动释放。`
+						? ` 已从另一个会话手里抢占（\`${truncatePath(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}）。`
 						: "";
 					ctx.ui?.notify?.(
 						result.ok

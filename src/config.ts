@@ -477,7 +477,7 @@ export function loadConfig(cwd: string): LoadedConfig {
 		warnings.push("出站和入站都没有可用配置：插件不会发送也不会接收任何消息。");
 	}
 
-	// "Silent until takeover" plus a takeover that can never happen is永久静默 —
+	// "Silent until takeover" plus a takeover that can never happen is permanently silent —
 	// the worst possible failure mode, because it looks like nothing is wrong.
 	if (config.notify.onlyWhenTakenOver && !(config.enabled && config.control.enabled && config.stream.enabled)) {
 		warnings.push(

@@ -71,7 +71,7 @@ function replyBlock(body: string): string {
 	let inFence = false;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
-		if (/^```/.test(line.trim())) inFence = !inFence;
+		if (/^`{3,}/.test(line.trim())) inFence = !inFence;
 		out.push(line);
 		if (inFence) continue;
 		const next = lines[i + 1];

@@ -287,10 +287,7 @@ export class CommandRouter {
 					await this.#handleQuiet(message, rest);
 					return;
 				case "ping":
-					await this.#reply(message, fmtText("🏓 pong", `omp 在线，接收正常。`));
-					return;
-				case "id":
-					await this.#handleId(message, senderId);
+					await this.#reply(message, fmtText("🏓 pong", "omp 在线，接收正常。"));
 					return;
 				default:
 					break;
