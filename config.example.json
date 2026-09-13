@@ -32,7 +32,6 @@
   },
 
   "notify": {
-    "sessionStart": true,
     "sessionStop": true,
     "$comment_sessionStop": "本轮跑完、omp 空闲时通知你，这是最主要的「任务完成」提醒。",
     "sessionShutdown": true,
@@ -64,6 +63,13 @@
     "onTimeout": "deny",
     "$comment_rules": "留空数组则使用内置的危险操作规则（rm -rf / sudo / git push / 敏感文件写入等）。",
     "rules": []
+  },
+
+  "question": {
+    "$comment": "把 omp 的「提问（ask）工具」转发到钉钉：会话里模型问你问题时，不再弹本地对话框，而是推送到钉钉等你在手机上回。仅在接管期间生效（本人在电脑前时照常弹本地框）。",
+    "enabled": true,
+    "timeoutMs": 600000,
+    "$comment_timeoutMs": "多久没回复就告知 omp 自行决定（毫秒，默认 600000 = 10 分钟）。"
   },
 
   "control": {

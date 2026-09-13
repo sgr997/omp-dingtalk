@@ -30,17 +30,22 @@ import {
 	fmtApprovalRequest,
 	fmtError,
 	fmtHelp,
-	fmtSessionStart,
+	fmtQuestionBlocked,
+	fmtQuestionRequest,
+	fmtQuestionTimeout,
 	fmtSessionStop,
+	fmtTakeoverSuccess,
 	fmtText,
 	fmtToolUse,
 	fmtTurnEnd,
+	formatQuestionInjection,
 	setSessionTag,
 	type Message,
 } from "./format";
 import { createLogger, type Logger } from "./logger";
 import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
 import { ApprovalRegistry, CommandRouter, type ApiLike, type CtxLike } from "./router";
+import { hashQuestions, QuestionRegistry, type PendingQuestion, type RemoteQuestion } from "./questions";
 import { DingTalkStream, type StreamStatus } from "./stream";
 import { extractText, extractToolNames, safeJson, truncate, truncatePath } from "./util";
 import { createHash } from "node:crypto";
@@ -48,6 +53,8 @@ import { basename } from "node:path";
 
 /** Custom session-entry namespace used to persist the mute flag across resumes. */
 const STATE_ENTRY = "com.omp-dingtalk.state";
+/** The omp/pi tool that prompts the user with a multiple-choice dialog. */
+const ASK_TOOL_NAME = "ask";
 /**
  * Hard cap on the shutdown notification send.
  *
@@ -83,6 +90,7 @@ class Bridge {
 	readonly log: Logger;
 	sender: DingTalkSender;
 	readonly approvals: ApprovalRegistry;
+	readonly questions: QuestionRegistry;
 	router: CommandRouter;
 
 	quiet: boolean;
@@ -122,6 +130,7 @@ class Bridge {
 		this.log = createLogger((pi as unknown as { logger?: unknown }).logger);
 		// `approvals` outlives config reloads so in-flight requests are not lost.
 		this.approvals = new ApprovalRegistry(this.log);
+		this.questions = new QuestionRegistry(this.log);
 		this.sender = new DingTalkSender(this.cfg, this.log);
 		this.router = this.#buildRouter();
 	}
@@ -132,6 +141,7 @@ class Bridge {
 			log: this.log,
 			sender: this.sender,
 			approvals: this.approvals,
+			questions: this.questions,
 			pi: this.#pi,
 			getCtx: () => this.ctx,
 			statusLines: () => this.statusLines(),
@@ -220,6 +230,84 @@ class Bridge {
 		return undefined;
 	}
 
+	/**
+	 * Intercept the agent's `ask` tool while DingTalk is in control.
+	 *
+	 * The ask tool opens a local TUI dialog and blocks the turn until someone
+	 * answers. With takeover active nobody is at the terminal, so the turn would
+	 * hang forever. We block the call (its reason text tells the model to stop
+	 * and wait), push the questions to DingTalk, and the router settles them
+	 * from the reply. Returns undefined when this session cannot act as the
+	 * human (not in control / no outbound / disabled), in which case the native
+	 * TUI dialog runs as usual.
+	 */
+	handleAskToolCall(event: { toolName?: string; input?: Record<string, unknown> }): { block: true; reason: string } | undefined {
+		if (!this.cfg.enabled || !this.cfg.question.enabled) return undefined;
+		if (String(event?.toolName ?? "") !== ASK_TOOL_NAME) return undefined;
+		// Only reroute while DingTalk is the one driving the session. Without a
+		// takeover there is no inbound channel, so nobody could answer remotely —
+		// leave the local dialog alone.
+		if (!this.takenOver) {
+			this.log.debug("ask 工具未接管会话，留在本地对话框");
+			return undefined;
+		}
+		if (!this.sender.configured) {
+			this.log.warn("提问转发需要可用的出站通道，本次留在本地对话框");
+			return undefined;
+		}
+
+		const questions = extractAskQuestions(event?.input);
+		if (!questions) return undefined; // Malformed — let OMP validate it.
+
+		const hash = hashQuestions(questions);
+		const timeoutMs = this.cfg.question.timeoutMs;
+		const pending = this.questions.register({
+			questions,
+			hash,
+			timeoutMs,
+			onRegistered: (question) => {
+				this.log.info(`远程提问 ${question.id} 已推送`, { count: questions.length });
+				this.notify(fmtQuestionRequest({ id: question.id, questions, timeoutMs }), {
+					priority: "high",
+					bypassQuiet: true,
+				});
+			},
+			duplicate: (existing) => {
+				this.log.info(`远程提问去重：复用 ${existing.id}`);
+			},
+			onTimeout: (question) => {
+				this.#questionTimeout(question);
+			},
+		});
+		return { block: true, reason: fmtQuestionBlocked({ id: pending.id, questions, timeoutMs }) };
+	}
+
+	#questionTimeout(question: PendingQuestion): void {
+		const timeoutMs = question.timeoutMs;
+		this.log.info(`远程提问 ${question.id} 超时，告知 omp 自行决定`);
+		// The agent was already told to stop and wait; give it permission to
+		// move on and tell the human what happened.
+		try {
+			const texts = question.questions
+				.map((q) => {
+					const recommended =
+						q.recommended !== undefined && q.options[q.recommended] ? `（推荐：${q.options[q.recommended]!.label}）` : "";
+					return `- ${q.question}${recommended}`;
+				})
+				.join("\n");
+			this.#pi.sendUserMessage(
+				`（钉钉远程提问 #${question.id} 在 ${Math.round(timeoutMs / 1000)}s 内未收到回答）\n${texts}\n\n请自行决定如何继续：按你判断的最合理默认方案继续，必要时换一种方式说明。`,
+				{ deliverAs: "followUp" },
+			);
+		} catch (error) {
+			this.log.error("通知 omp 提问超时失败", error);
+		}
+		this.notify(fmtQuestionTimeout({ id: question.id, questions: question.questions, timeoutMs }), {
+			priority: "normal",
+			bypassQuiet: true,
+		});
+	}
+
 	setQuiet(value: boolean): void {
 		this.quiet = value;
 		try {
@@ -266,6 +354,7 @@ class Bridge {
 			lockLine,
 			`- **入站通道**: ${this.streamStatus.state}${this.streamStatus.detail ? ` (${this.streamStatus.detail})` : ""} · 重连 ${this.streamStatus.reconnects} 次`,
 			`- **待审批**: ${pending}`,
+			`- **待回答提问**: ${this.questions.size}`,
 			`- **配置来源**: ${this.loaded.sources.join(" | ") || "(默认值)"}`,
 		];
 	}
@@ -400,6 +489,7 @@ class Bridge {
 		this.streamStatus = { state: "idle", reconnects: this.streamStatus.reconnects };
 		// Nobody can answer them any more; resolving as deny is the safe default.
 		this.approvals.clear("已解除钉钉接管");
+		this.questions.clear("已解除钉钉接管");
 		if (wasTakenOver) this.log.info("已解除钉钉接管");
 		return { wasTakenOver };
 	}
@@ -409,6 +499,7 @@ class Bridge {
 		this.#stopLockHeartbeat();
 		this.lock?.release();
 		this.approvals.clear(reason);
+		this.questions.clear(reason);
 		if (this.stream) {
 			this.stream.stop();
 			this.stream = undefined;
@@ -493,6 +584,50 @@ function matchApprovalRules(event: { toolName?: string; input?: Record<string, u
 		}
 	}
 	return null;
+}
+
+/**
+ * Coerce an `ask` tool call's raw input into a question list.
+ *
+ * The input is untrusted (partially streamed or model-mangled), so anything
+ * that does not look like a usable question is rejected and left to OMP's own
+ * validation. Questions with no options are kept — the answer is then free text.
+ */
+function extractAskQuestions(input: unknown): RemoteQuestion[] | undefined {
+	const questions = (input as { questions?: unknown } | undefined)?.questions;
+	if (!Array.isArray(questions) || questions.length === 0) return undefined;
+
+	const out: RemoteQuestion[] = [];
+	for (const raw of questions) {
+		if (!raw || typeof raw !== "object") return undefined;
+		const q = raw as Record<string, any>;
+		const question = typeof q.question === "string" ? q.question.trim() : "";
+		if (!question) return undefined;
+
+		const options: RemoteQuestion["options"] = [];
+		if (q.options !== undefined) {
+			if (!Array.isArray(q.options)) return undefined;
+			for (const option of q.options) {
+				if (!option || typeof option !== "object" || typeof option.label !== "string") return undefined;
+				options.push({
+					label: option.label,
+					...(typeof option.description === "string" && option.description.trim()
+						? { description: option.description.trim() }
+						: {}),
+				});
+			}
+		}
+
+		out.push({
+			id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${out.length + 1}`,
+			question,
+			...(typeof q.header === "string" && q.header.trim() ? { header: q.header.trim() } : {}),
+			options,
+			multi: q.multi === true,
+			...(typeof q.recommended === "number" && q.recommended >= 0 ? { recommended: q.recommended } : {}),
+		});
+	}
+	return out;
 }
 
 /** Readable rendering of a tool call for the approval prompt. */
@@ -588,27 +723,29 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			// the session waits for an explicit `/dingtalk takeover`.
 			if (b.cfg.control.autoTakeover) {
 				const result = b.takeOver();
-				if (!result.ok) b.log.warn(`自动接管失败：${result.reason}`);
+				if (!result.ok) {
+					b.log.warn(`自动接管失败：${result.reason}`);
+				} else {
+					b.notify(
+						fmtTakeoverSuccess({
+							cwd: b.cwd,
+							scope: b.cfg.control.scope,
+							preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
+							releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
+						}),
+						{ priority: "high", bypassQuiet: true, bypassTakeover: true },
+					);
+				}
 			} else if (b.takenOver) {
 				b.release();
 				b.log.info("新会话不再继承钉钉接管（control.autoTakeover = false）");
 			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
 				b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
 			}
-
-			if (b.cfg.notify.sessionStart) {
-				b.notify(
-					fmtSessionStart({
-						cwd: ctx?.cwd ?? process.cwd(),
-						model: ctx?.model ? `${ctx.model.provider ?? "?"}/${ctx.model.id ?? "?"}` : undefined,
-						sessionName: pi.getSessionName?.(),
-						warnings: b.warnings,
-						control: !b.cfg.enabled || !b.cfg.control.enabled ? "off" : b.takenOver ? "active" : "inert",
-						scope: b.cfg.control.scope,
-					}),
-					{ priority: "normal", dedupeKey: "session-start" },
-				);
-			}
+			// No startup notification on purpose: a launch is ordinary, and a
+			// DingTalk ping for every new session is noise. Takeover — whether
+			// automatic (`control.autoTakeover`) or via `/dingtalk takeover` —
+			// is the event worth announcing, and it pushes its own confirmation.
 		}),
 	);
 
@@ -702,6 +839,12 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		safe("tool_call", async (event, ctx) => {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
+
+			// Remote questions: while DingTalk drives the session, the agent's
+			// local ask dialog is unreachable — reroute it to the phone. This
+			// runs before the approval gate so `ask` never double-pings.
+			const askGate = b.handleAskToolCall(event);
+			if (askGate) return askGate;
 
 			if (!b.cfg.enabled || b.cfg.approval.mode !== "remote") return undefined;
 			if (!b.sender.configured) {
@@ -873,6 +1016,20 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 							: `无法接管：${result.reason}`,
 						result.ok ? "info" : "error",
 					);
+					// Takeover is the moment DingTalk actually gains control, so it
+					// is worth a push — this is the only "handed over" signal the
+					// phone gets when the session was launched with autoTakeover off.
+					if (result.ok) {
+						b.notify(
+							fmtTakeoverSuccess({
+								cwd: b.cwd,
+								scope: b.cfg.control.scope,
+								preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
+								releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
+							}),
+							{ priority: "high", bypassQuiet: true, bypassTakeover: true },
+						);
+					}
 					return;
 				}
 

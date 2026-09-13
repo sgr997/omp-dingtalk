@@ -4,6 +4,7 @@
 
 - **出站（通知）**：会话启动、本轮跑完变空闲、需要审批、重试耗尽、凭据失效 → 钉钉消息。
 - **入站（控制）**：在钉钉里发文字就能给 omp 下指令、批准/拒绝敏感操作、中断执行、切模型、压缩上下文。
+- **远程提问**：模型用「提问（ask）」工具问你问题时，自动转发到钉钉，在手机上一键作答——长任务不会因为没人回答而卡住。
 
 零运行时依赖，只用 Node/Bun 内置能力（`node:crypto`、全局 `fetch`、全局 `WebSocket`），所以 `omp plugin link` 之后不需要再跑 `bun install`。
 
@@ -54,7 +55,7 @@
 }
 ```
 
-- 收件人填**钉钉 userId**，也就是入站消息里的 `senderStaffId` —— 给机器人发 `/id` 就能拿到。
+- 收件人填**钉钉 userId**，也就是入站消息里的 `senderStaffId` —— 给机器人发 `/whoami` 就能拿到（`/id` 是别名）。
 - 懒得抄就留空 `directUserIds`，靠 `learnFromInbound`：**白名单里的人**给机器人发过消息后自动成为收件人（只认 `control.allowUserIds` 里的人，陌生人 DM 机器人不会把自己加进来）。
 - 应用侧还需要**机器人发送消息**权限，且收件人在应用的可见范围内；不满足会返回 403，`bun run doctor` 会把这条列出来。
 - 走 `direct` 时**不受**自定义机器人 20 条/分钟的限制。
@@ -143,7 +144,7 @@ bun run watch 60000    # 抓 60 秒
 
 > 钉钉**不一定会推 `REGISTERED` 帧**。连上却没有收到它，不代表配置有问题——只有真收到消息帧才算通。`bun run doctor` 已经把「能连上」判定为通过。
 
-全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/id`，把返回的 `senderStaffId` 填进 `control.allowUserIds`。
+全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/whoami`，把返回的 `senderStaffId` 填进 `control.allowUserIds`。
 
 
 <details>
@@ -177,7 +178,7 @@ cp config.example.json ~/.omp/dingtalk.json
 - 调限流：`OMP_DINGTALK_MIN_GAP_MS`（默认 2200）、`OMP_DINGTALK_MAX_PER_MIN`（默认 20）。
 - 调接管：`OMP_DINGTALK_HEARTBEAT_MS`（心跳周期，默认 5000，决定被抢占后多久让位）、`OMP_DINGTALK_LOCK_DIR`（锁文件目录，默认 `~/.omp/agent`）。
 - 改完配置**开新会话**即生效，不用重启 omp。
-- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_IDS`（逗号分隔）、`DINGTALK_APPROVAL_MODE`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`、`DINGTALK_DIRECT_USER_IDS`（逗号分隔）。
+- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_IDS`（逗号分隔）、`DINGTALK_APPROVAL_MODE`、`DINGTALK_QUESTION_ENABLED`、`DINGTALK_QUESTION_TIMEOUT_MS`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`、`DINGTALK_DIRECT_USER_IDS`（逗号分隔）。
 - 只给某个项目配（比如公司项目）：放到 `<项目>/.omp/dingtalk.json`，只覆盖要改的字段。
 
 ### 只认单聊 + 显式接管（推荐的保守配置）
@@ -202,7 +203,9 @@ cp config.example.json ~/.omp/dingtalk.json
 
 任何能触达机器人的 1:1 对话都能控制 omp 是危险的。让机器人告诉你自己的 ID：
 
-> 在**单聊**里给机器人发 `/id`
+> 在**单聊**里给机器人发 `/whoami`（`/id`、`我是谁` 也一样）
+
+这条指令**在配白名单之前就能用**——首次接入时你还没进 `allowUserIds`，机器人也会回复你的身份卡。
 
 把返回的 `senderStaffId` 填进 `control.allowUserIds`。留空则不做鉴权。
 （这个 ID 同时也是 `outbound.directUserIds` 要填的值。）
@@ -270,6 +273,22 @@ omp --approval-mode=yolo
 
 `onlyWhenTakenOver: true` 让**接管前完全静默**：平时零打扰，出门前在 omp 里敲一句 `/dingtalk takeover`，之后才开始收通知；回来 `/dingtalk release` 又恢复安静。
 
+### 远程提问（Ask/AskUserQuestion）也能在钉钉里回答
+
+omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**，人在电脑前没问题；但你走了之后，它就永远等下去。本插件在钉钉接管期间（`/dingtalk takeover` 之后）会把提问**转发到钉钉**：
+
+- 你会在单聊里收到「❓ 需要你的回答」，问题选项按 `1.1 1.2` 编号、推荐项标了「（推荐）」。
+- **直接回复选项号**：单选 `2`、多选 `2,4`、多个问题 `1:2 2:1`；回复选项文字也行；回任意文字就是自定义答案。
+- 回复后立即注入会话，模型带着问题和答案继续干活，**不会卡住**。
+- `question.timeoutMs`（默认 10 分钟）内没回复，会通知 omp 自行决定，任务照样往前走。
+
+控制条件：
+
+- `question.enabled: false` 可以整体关掉（默认开）。
+- **只在接管期间转发**：本人在电脑前（未接管）时提问照常弹本地框，不打扰。
+- 想让“离开后没人看的任务”也能被钉钉接管，把 `control.autoTakeover: true` 打开——会话一启动就自动接管，长任务里的每个提问都能在手机上答。
+- 同一问题在等待期间模型重复提问不会重复推送（自动去重）。
+
 ### 多个会话都想接管：后来者覆盖，旧会话自动让位
 
 一个钉钉应用在同一个连接层面只应该有**一个**消费者。如果两个 omp 会话同时连着，钉钉把消息推给哪个连接是不确定的——你的 `停止` 可能打断了另一个会话，你的 `同意` 可能被一个从没发问的会话应答，而真正在等审批的那个只能超时被拒。这不是「两个人一起管」，而是掷硬币。
@@ -319,6 +338,8 @@ omp --approval-mode=yolo
 | `停止` / `/stop` | 中断当前执行 |
 | `同意` / `/approve [编号]` | 批准待审批操作（不写编号则批准最新一条） |
 | `拒绝` / `/deny [编号]` | 拒绝 |
+| `1` / `2,4` / 选项文字 | 回答远程提问（有「❓ 需要你的回答」时，非指令文字优先当作答案） |
+| `1:2 2:1` | 多个问题的回答格式（问题号:选项号） |
 | `状态` / `/status` | 会话、模型、待审批、发送队列、通道状态 |
 | `/tools` | 当前启用的工具 |
 | `/model <模型名>` | 切换模型，如 `/model opus` |
@@ -406,7 +427,7 @@ bun run test
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
 | 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
-| 收到「omp 已启动」但我不想要 | 它由 `notify.sessionStart` 控制，和接管**无关**（通知是纯出站，不需要接管）。想彻底安静用 `notify.onlyWhenTakenOver: true`；只想少一条消息就设 `sessionStart: false` |
+| 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
 | 设了 `direct` 但单聊收不到通知 | ① `stream.robotCode` 是否填了（`ding` 开头）② `outbound.directUserIds` 是否为空、或还没人在白名单里发过消息 ③ 应用是否有**机器人发送消息**权限、收件人是否在应用可见范围内 ④ `/dingtalk status` 看「出站通道」和「单聊收件人」两行 |
 | 通知还是发到群里 | `outbound.mode` 是不是 `webhook` 或 `both`。自定义机器人**只能发群**，要私聊必须用 `direct` |
 | 群里 @机器人 没反应 | 默认就是这样：`control.scope = "direct"` 时群聊消息一律忽略。要用群聊得显式改成 `group` / `all` |
@@ -422,6 +443,9 @@ bun run test
 | 命令回复延迟几秒 | 正常：出站限流最短间隔 2.2 秒 |
 | 改了配置没生效 | 配置在**会话启动时**重载，开个新会话；`/dingtalk status` 会列出实际生效的配置来源 |
 | 审批总是超时被拒 | 调大 `approval.timeoutMs`；或把 `onTimeout` 改成 `allow`（不推荐） |
+| 收到「❓ 需要你的回答」怎么答 | 直接回复选项号（单选 `2`、多选 `2,4`、多问题 `1:2 2:1`），回复选项文字也可以，任意其它文字当作自定义答案 |
+| 没收到提问推送 | ① 是否已 `/dingtalk takeover`（未接管时不转发）② `question.enabled` 是否为 false ③ 检查提问工具是否真的被模型调用（看 omp 会话里有没有「提问」块）④ `/dingtalk status` 看「待回答提问」 |
+| 提问一直没人答会怎样 | 到 `question.timeoutMs`（默认 10 分钟）后告知 omp 自行决定，不会永久卡住 |
 | 日志出现 `handler timed out after 2000ms` | omp 对事件处理器有 **2 秒**硬限制。退出通知已把上限压到 1.5 秒；如果你在改代码时新增了阻塞调用，要把它移出 handler |
 | 远程审批（`approval.mode: remote`）到底能不能拦住 | **未实测**。omp 只给 handler 2 秒，而审批要等你回消息，两者可能冲突——正式启用前建议先拿一条无害的危险命令试一次，确认拦截真的生效 |
 
