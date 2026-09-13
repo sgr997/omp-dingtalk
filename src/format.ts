@@ -74,7 +74,14 @@ function replyBlock(body: string): string {
 		if (/^`{3,}/.test(line.trim())) inFence = !inFence;
 		out.push(line);
 		if (inFence) continue;
+		// A table row (`| a | b |`) must stay contiguous with its neighbours or
+		// DingTalk's parser drops the whole table. No blank line *between* rows;
+		// add one only after the table block ends and normal text resumes.
 		const next = lines[i + 1];
+		if (/^\s*\|.*\|\s*$/.test(line.trim())) {
+			if (next !== undefined && next.trim() !== "" && !/^\s*\|.*\|\s*$/.test(next.trim())) out.push("");
+			continue;
+		}
 		if (line.trim() === "" || next === undefined || next.trim() === "" || /^\s/.test(next)) continue;
 		out.push("");
 	}

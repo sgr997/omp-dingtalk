@@ -713,6 +713,29 @@ console.log("\n[12] 会话事件 → 通知");
 	check("回复保留内层代码块", String(replyText ?? "").includes("```bash\necho hi\n```"), replyText);
 	check("相邻普通行用空行分段", String(replyText ?? "").includes("先跑测试\n\n再改代码"), replyText);
 
+	// A markdown table must stay contiguous — a blank line between rows makes
+	// DingTalk drop the whole table. Normal paragraphs still need their blank
+	// line, so the separator resumes after the table block ends.
+	await fire("turn_end", {
+		type: "turn_end",
+		turnIndex: 3,
+		message: {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: "改完了\n| 项目 | 状态 |\n|------|------|\n| 登录 | 完成 |\n以上。",
+				},
+			],
+		},
+		toolResults: [],
+	});
+	const tableReady = await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("| 项目 |"));
+	const tableText = tableReady ? String(webhookPosts().at(-1)?.body?.markdown?.text ?? "") : "";
+	check("表格行保持连续（行间不插空行）", tableText.includes("| 项目 | 状态 |\n|------|------|\n| 登录 | 完成 |"), tableText);
+	check("表格前的普通行仍分段", tableText.includes("改完了\n\n| 项目 | 状态 |"), tableText);
+	check("表格块结束后恢复分段", tableText.includes("| 登录 | 完成 |\n\n以上。"), tableText);
+
 	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 1, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "全部完成" }] }, session_id: "s1", stop_hook_active: false });
 	// Match the exact title: a loose `includes("空闲")` also matches the `/stop`
 	// reply "ℹ️ omp 本来就空闲", which would let this pass without the session_stop
