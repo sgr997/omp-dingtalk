@@ -285,6 +285,15 @@ check("注册了 session_start", handlers.has("session_start"));
 check("注册了 tool_call", handlers.has("tool_call"));
 check("注册了 session_stop", handlers.has("session_stop"));
 check("注册了 /dingtalk 命令", commands.has("dingtalk"));
+{
+	const dt = commands.get("dingtalk");
+	check("dingtalk 命令带子命令补全", typeof dt?.getArgumentCompletions === "function");
+	const all = dt?.getArgumentCompletions?.("") ?? [];
+	const filtered = dt?.getArgumentCompletions?.("tak") ?? [];
+	check("补全列出全部子命令", all.length >= 6, all.length);
+	check("补全按前缀过滤", filtered.length === 1 && filtered[0]?.value === "takeover", filtered);
+	check("补全不匹配时为空", (dt?.getArgumentCompletions?.("zzz") ?? []).length === 0);
+}
 check("注册了 dingtalk_notify 工具", tools.has("dingtalk_notify"));
 
 console.log("\n[2] session_start → 无启动通知 + Stream 建连 + autoTakeover 推送接管确认");

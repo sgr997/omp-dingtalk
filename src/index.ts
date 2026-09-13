@@ -1069,6 +1069,20 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 
 	pi.registerCommand("dingtalk", {
 		description: "钉钉机器人：status | takeover | release | test | quiet on|off | help",
+		getArgumentCompletions: (prefix: string) => {
+			const subs = [
+				{ value: "status", description: "会话 / 模型 / 待审批 / 发送队列 / 通道状态" },
+				{ value: "takeover", description: "让钉钉接管本会话（远程控制 + 审批）" },
+				{ value: "release", description: "解除接管，关闭入站通道" },
+				{ value: "test", description: "发一条测试通知到钉钉，确认能收到" },
+				{ value: "quiet", description: "静音开关：quiet on | quiet off" },
+				{ value: "help", description: "钉钉指令说明" },
+			];
+			const p = String(prefix ?? "").trim().toLowerCase();
+			return subs
+				.filter((s) => !p || s.value.startsWith(p))
+				.map((s) => ({ value: s.value, label: s.value, description: s.description }));
+		},
 		handler: async (args: string, ctx: any) => {
 			try {
 				const b = ensure(ctx?.cwd ?? process.cwd());
