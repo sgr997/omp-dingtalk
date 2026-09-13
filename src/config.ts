@@ -221,6 +221,7 @@ export const DEFAULT_APPROVAL_RULES: ApprovalRule[] = [
 
 /** Valid `control.scope` values, in the order they should be presented. */
 export const SCOPES = ["direct", "group", "all"] as const;
+export const APPROVAL_MODES = ["off", "remote"] as const;
 
 export const SCOPE_LABELS: Record<ControlConfig["scope"], string> = {
 	direct: "仅单聊",
@@ -441,8 +442,23 @@ export function loadConfig(cwd: string): LoadedConfig {
 		}
 		config.control.scope = "direct";
 	}
+	// A typo in `approval.mode` must not silently disable the approval gate —
+	// same treatment as scope / outbound.mode.
+	const rawApprovalMode = config.approval.mode as unknown;
+	if (typeof rawApprovalMode !== "string" || !(APPROVAL_MODES as readonly string[]).includes(rawApprovalMode)) {
+		if (rawApprovalMode !== undefined) {
+			warnings.push(`approval.mode 的值 ${JSON.stringify(rawApprovalMode)} 无效，已回退为 "off"（只通知不拦截）。`);
+		}
+		config.approval.mode = "off";
+	}
 	config.control.requireAt = config.control.requireAt !== false;
 	config.control.autoTakeover = config.control.autoTakeover === true;
+
+	// Empty allowlist = every inbound command is refused (fail-closed). That is
+	// the safe default, but it is surprising mid-onboarding, so say it out loud.
+	if (config.control.enabled && config.control.allowUserIds.length === 0) {
+		warnings.push("control.allowUserIds 为空：除 /id 外所有入站指令都会被拒绝。把 /id 返回的 senderStaffId 填进去才能控制 omp。");
+	}
 
 	// The stream channel is only usable with real credentials.
 	if (config.stream.enabled && (!config.stream.clientId || !config.stream.clientSecret)) {

@@ -81,7 +81,7 @@
     "requireAt": true,
     "$comment_requireAt": "群聊里只有 @ 机器人时才响应，避免群里闲聊误触发。scope 为 direct 时无影响。",
     "allowUserIds": [],
-    "$comment_allowUserIds": "强烈建议填写。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。留空则任何能触达机器人的人都能控制 omp。",
+    "$comment_allowUserIds": "必填。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。留空 = 拒绝所有指令（除 /id 本身），这是故意的安全默认。",
     "freeText": true,
     "freeTextDelivery": "steer",
     "$comment_freeTextDelivery": "steer = 打断当前轮次立刻执行；followUp = 等当前轮次跑完再执行。",

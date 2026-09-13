@@ -258,10 +258,25 @@ export class CommandRouter {
 			return;
 		}
 
+		// Fail-closed: an empty allowlist is not an open door. `/id` above still
+		// works, so onboarding is: send /id → fill control.allowUserIds → commands
+		// start being accepted.
 		const allow = cfg.control.allowUserIds;
-		if (allow.length > 0 && !allow.includes(senderId)) {
-			log.warn("拒绝未授权指令", { senderId, nick: message.senderNick });
-			await this.#reply(message, fmtText("⛔ 未授权", `你的 senderStaffId 是 \`${senderId || "未知"}\`，不在白名单中。`));
+		if (!allow.includes(senderId)) {
+			log.warn("拒绝未授权指令", { senderId, nick: message.senderNick, allowlistEmpty: allow.length === 0 });
+			await this.#reply(
+				message,
+				fmtText(
+					"⛔ 未授权",
+					[
+						`你的 senderStaffId 是 \`${senderId || "未知"}\`。`,
+						``,
+						allow.length === 0
+							? `本机器人还没配置白名单（\`control.allowUserIds\` 为空 = 拒绝所有指令）。把上面的 ID 填进该配置项即可开启控制。`
+							: `你不在白名单（\`control.allowUserIds\`）中，无法控制 omp。`,
+					].join("\n"),
+				),
+			);
 			return;
 		}
 
@@ -529,8 +544,13 @@ export class CommandRouter {
 		await this.#reply(message, fmtQuiet(on));
 	}
 
+	/**
+	 * Answers the caller's own identity — deliberately open before the allowlist
+	 * (it is the onboarding step), but it echoes ONLY what the caller already
+	 * knows about themselves: their own id and nick. Conversation metadata and
+	 * the session's config stay behind the allowlist.
+	 */
 	async #handleId(message: RobotMessage, senderId: string): Promise<void> {
-		const scope = this.#deps.cfg.control.scope;
 		await this.#reply(
 			message,
 			fmtText(
@@ -538,13 +558,8 @@ export class CommandRouter {
 				[
 					`- **senderStaffId**: \`${senderId || "(空)"}\``,
 					`- **昵称**: ${message.senderNick ?? "(未知)"}`,
-					`- **会话类型**: ${message.conversationType === "1" ? "单聊" : "群聊"}`,
-					`- **会话 ID**: \`${truncate(message.conversationId ?? "", 80)}\``,
 					``,
-					`> 首次接入还没配白名单时也能用——把这个 ID 填进 \`control.allowUserIds\` 即可锁定只有你能控制。`,
-					scope === "direct"
-						? `当前 \`control.scope = "direct"\`，只有单聊消息会被处理。`
-						: `当前 \`control.scope = "${scope}"\`。`,
+					`> 把这个 ID 填进 \`control.allowUserIds\`（白名单为空时拒绝所有指令），然后重新发消息即可控制 omp。`,
 				].join("\n"),
 			),
 		);

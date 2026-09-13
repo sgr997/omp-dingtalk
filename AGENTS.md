@@ -43,7 +43,7 @@
 **安全默认（agent 直接按这个引导，不要问）：**
 - `control.scope: "direct"` —— 只认单聊，群聊一律不理（防误触）。
 - `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通。
-- `control.allowUserIds` 必填 —— 白名单，**留空则任何能触达机器人的人都能控制 omp**，必须引导用户配。
+- `control.allowUserIds` 必填 —— 白名单，**留空 = 拒绝一切指令（fail-closed）**，引导用户用 `/id` 拿到 ID 后填入。
 - 通知走私聊优先 `direct`（不打扰群），但要有企业内部应用。
 
 ---

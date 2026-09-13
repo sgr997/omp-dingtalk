@@ -207,7 +207,7 @@ cp config.example.json ~/.omp/dingtalk.json
 
 这条指令**在配白名单之前就能用**——首次接入时你还没进 `allowUserIds`，机器人也会回复你的身份卡。
 
-把返回的 `senderStaffId` 填进 `control.allowUserIds`。留空则不做鉴权。
+把返回的 `senderStaffId` 填进 `control.allowUserIds`。**留空 = 拒绝所有指令**（fail-closed：白名单为空时除 `/id` 外一律拒绝，陌生人触达机器人也控制不了 omp）。`/id` 只回显你自己的 ID，不带任何会话信息，所以白名单没配好之前也能用。
 （这个 ID 同时也是 `outbound.directUserIds` 要填的值。）
 
 ---
@@ -439,7 +439,7 @@ bun run doctor
 bun run test
 ```
 
-- `test/smoke.ts` — 185 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
+- `test/smoke.ts` — 191 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---

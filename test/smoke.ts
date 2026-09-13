@@ -29,7 +29,10 @@ const MAIN_CONTROL = {
 	scope: "direct",
 	autoTakeover: true,
 	requireAt: true,
-	allowUserIds: [] as string[],
+	// The allowlist is fail-closed: an empty list refuses everything. Test
+	// sections that need an open list set it explicitly; the default carries the
+	// mock sender so ordinary sections stay authorized.
+	allowUserIds: ["staff-smoke"] as string[],
 	freeText: true,
 	freeTextDelivery: "steer",
 	replyToSession: true,
@@ -395,6 +398,24 @@ console.log("\n[5] 白名单鉴权");
 	latest.robot("状态");
 	check("白名单外的其他指令被拒绝", await waitFor(() => sessionReplies().length > before));
 	check("拒绝提示包含 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"));
+
+	// Fail-closed: an EMPTY allowlist refuses everything except /id.
+	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserIds: [] } }));
+	await fire("session_start", { type: "session_start" });
+	const emptyList = MockSocket.instances.at(-1)!;
+	emptyList.open();
+	emptyList.system("REGISTERED");
+	const beforeEmpty = sentPrompts.length;
+	const beforeEmptyReply = sessionReplies().length;
+	emptyList.robot("状态");
+	check("空白名单拒绝指令（fail-closed）", await waitFor(() => sessionReplies().length > beforeEmptyReply));
+	check("空白名单的拒绝提示点明配置为空", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("为空"), String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").slice(0, 160));
+	check("空白名单不会把指令投给 omp", sentPrompts.length === beforeEmpty);
+	const beforeId2 = sessionReplies().length;
+	emptyList.robot("/id");
+	check("空白名单下 /id 仍可用", await waitFor(() => sessionReplies().length > beforeId2));
+	check("/id 不再回显会话 ID（S2）", !String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("cid-smoke"), String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").slice(0, 200));
+	check("/id 不再回显 scope 配置（S2）", !String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("scope = "), String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").slice(0, 200));
 }
 
 // Restore the permissive config for the remaining cases.
@@ -1117,7 +1138,7 @@ console.log("\n[22] scope = direct 时群聊消息一律忽略");
 			// suite running against a session that had quietly stood down.
 			stream: { ...MAIN_CONFIG.stream, clientId: "scope-client", clientSecret: "scope-secret", robotCode: "ding-scope" },
 			outbound: { mode: "webhook" },
-			control: { ...MAIN_CONTROL, scope: "direct", autoTakeover: true, requireAt: true, allowUserIds: [] },
+			control: { ...MAIN_CONTROL, scope: "direct", autoTakeover: true, requireAt: true, allowUserIds: ["staff-smoke"] },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1157,7 +1178,7 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=SILENTTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "silent-client", clientSecret: "silent-secret", robotCode: "ding-silent" },
 			notify: { onlyWhenTakenOver: true },
-			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserIds: [] },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserIds: ["staff-smoke"] },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
