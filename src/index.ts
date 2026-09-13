@@ -121,6 +121,14 @@ class Bridge {
 	#lastAssistantText = "";
 	#lockClientId = "";
 	#lockTimer: ReturnType<typeof setInterval> | undefined;
+	/** Last inbound DingTalk message — used to react with ✅/❌ on session_stop. */
+	#lastInboundMessage: { msgId?: string; conversationId?: string; robotCode?: string } = {};
+	/**
+	 * Set when the run ends with an unrecovered error (`auto_retry_end` with
+	 * success=false). `session_stop` consumes it to pick ❌ instead of ✅, then
+	 * resets it so the next run starts clean.
+	 */
+	hadError = false;
 
 	constructor(pi: ApiLike, readonly cwd: string) {
 		this.#pi = pi;
@@ -370,7 +378,10 @@ class Bridge {
 			clientId: this.cfg.stream.clientId,
 			clientSecret: this.cfg.stream.clientSecret,
 			logger: this.log,
-			onMessage: (message) => this.router.handle(message),
+			onMessage: (message) => {
+				if (message?.msgId) this.#lastInboundMessage = { msgId: message.msgId, conversationId: message.conversationId, robotCode: message.robotCode };
+				this.router.handle(message);
+			},
 			onStatus: (status) => {
 				this.streamStatus = status;
 			},
@@ -510,6 +521,19 @@ class Bridge {
 	setLastAssistant(message: unknown): void {
 		const text = extractText(message).trim();
 		if (text) this.#lastAssistantText = text;
+	}
+
+	/**
+	 * React with an emoji to the most recent inbound DingTalk message.
+	 *
+	 * Used at `session_stop`: ✅ when the run finished cleanly, ❌ when it ended
+	 * on an unrecovered error. No-op when nothing has been received yet, or the
+	 * emotion call fails — reactions are best-effort, never block the settle.
+	 */
+	async reactToLastInbound(emoji: string): Promise<void> {
+		if (!this.#lastInboundMessage.msgId) return;
+		const result = await this.sender.sendEmotion(this.#lastInboundMessage, emoji);
+		if (!result.ok) this.log.debug(`表情回复失败：${result.errmsg}`);
 	}
 
 	get lastAssistantText(): string {
@@ -796,6 +820,15 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			b.turnCount += 1;
 			if (event?.last_assistant_message) b.setLastAssistant(event.last_assistant_message);
 
+			// React to the message that drove this run: ✅ on a clean finish, ❌
+			// when it ended on an unrecovered error. Best-effort and independent
+			// of the notify switches — a reaction is a lightweight signal, not a
+			// push. Reset the flag so the next run starts from a clean state.
+			if (b.takenOver && !b.quiet) {
+				await b.reactToLastInbound(b.hadError ? "❌" : "✅");
+			}
+			b.hadError = false;
+
 			if (!b.cfg.notify.sessionStop) return;
 			b.notify(
 				fmtSessionStop({
@@ -928,6 +961,9 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		"auto_retry_end",
 		safe("auto_retry_end", async (event, ctx) => {
 			const b = ensure(ctx?.cwd ?? process.cwd());
+			// Remember the failure so session_stop can react with ❌ instead of ✅,
+			// even when error notifications are muted.
+			if (!event?.success) b.hadError = true;
 			if (!b.cfg.notify.errors || event?.success) return;
 			b.notify(
 				fmtError({

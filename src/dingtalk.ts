@@ -467,4 +467,61 @@ export class DingTalkSender {
 		this.#accessTokenExpiresAt = Date.now() + Math.max(60, (payload.expireIn ?? 7200) - 60) * 1000;
 		return this.#accessToken;
 	}
+
+	/**
+	 * Add an emoji reaction to an inbound message.
+	 *
+	 * Uses the enterprise-app robot OpenAPI (`/v1.0/robot/emotion/reply`), which
+	 * needs `access_token` + `robotCode` + the message's `msgId` and
+	 * `conversationId` — both available on every `RobotMessage` the Stream
+	 * delivers. Unlike `sessionWebhook` this does not expire, so it works even
+	 * on long-running sessions.
+	 *
+	 * Returns true on success so the caller can skip a fallback message.
+	 */
+	async sendEmotion(message: {
+		msgId?: string;
+		conversationId?: string;
+		robotCode?: string;
+	}, emoji: string): Promise<SendResult> {
+		const msgId = message.msgId;
+		const conversationId = message.conversationId;
+		const robotCode = message.robotCode ?? this.#cfg.stream.robotCode;
+		if (!msgId || !conversationId || !robotCode) {
+			return { ok: false, errmsg: "缺少 msgId / conversationId / robotCode，无法发送表情" };
+		}
+		try {
+			const token = await this.#getAccessToken();
+			if (!token) return { ok: false, errmsg: "获取 access_token 失败" };
+			const response = await fetch("https://api.dingtalk.com/v1.0/robot/emotion/reply", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-acs-dingtalk-access-token": token,
+				},
+				body: JSON.stringify({
+					robotCode,
+					openMsgId: msgId,
+					openConversationId: conversationId,
+					emotionType: 2,
+					emotionName: emoji,
+					textEmotion: {
+						emotionId: "2659900",
+						emotionName: emoji,
+						text: emoji,
+						backgroundId: "im_bg_1",
+					},
+				}),
+				signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+			});
+			if (!response.ok) {
+				const raw = await response.text();
+				this.#log.warn("表情回复失败", { status: response.status, body: raw.slice(0, 300) });
+				return { ok: false, errmsg: `HTTP ${response.status}: ${raw.slice(0, 200)}` };
+			}
+			return { ok: true };
+		} catch (error) {
+			return { ok: false, errmsg: error instanceof Error ? error.message : String(error) };
+		}
+	}
 }

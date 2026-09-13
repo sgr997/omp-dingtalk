@@ -424,8 +424,16 @@ export class CommandRouter {
 		const idle = ctx?.isIdle?.() ?? true;
 		this.#deps.pi.sendUserMessage(text, { deliverAs: delivery });
 
-		const how = idle ? "已开始执行" : delivery === "steer" ? "已插入当前轮次（会打断）" : "已排队，等当前轮次结束";
-		await this.#reply(message, fmtText("📨 已投递给 omp", `${how}\n\n> ${truncate(text, 300)}`));
+		// Acknowledge with an emoji reaction instead of a reply card.
+		// The emotion API uses the message's msgId/conversationId, which
+		// do not expire (unlike sessionWebhook), so it works on long sessions.
+		const emoji = idle ? "👀" : delivery === "steer" ? "⚡" : "📋";
+		const result = await this.#deps.sender.sendEmotion(message, emoji);
+		if (!result.ok) {
+			// Fallback to a reply card if the emotion API is unavailable.
+			const how = idle ? "已开始执行" : delivery === "steer" ? "已插入当前轮次（会打断）" : "已排队，等当前轮次结束";
+			await this.#reply(message, fmtText("📨 已投递给 omp", `${how}\n\n> ${truncate(text, 300)}`));
+		}
 	}
 
 	async #handleCompact(message: RobotMessage, instructions: string): Promise<void> {

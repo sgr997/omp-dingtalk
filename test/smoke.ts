@@ -648,6 +648,15 @@ console.log("\n[10] 自由文本 → 注入会话，且不会误判为指令");
 	const beforeFollow = sentPrompts.length;
 	live.robot("/follow 帮我跑一遍测试");
 	check("/follow 以 followUp 投递", await waitFor(() => sentPrompts.length > beforeFollow) && sentPrompts.at(-1)?.options?.deliverAs === "followUp");
+
+	// Free-text prompts now acknowledge with an emoji reaction (emotion API)
+	// instead of a reply card. The emotion call goes to /robot/emotion/reply.
+	const emotionBefore = requests.filter((r) => r.url.includes("/robot/emotion/reply")).length;
+	const beforePrompt = sentPrompts.length;
+	live.robot("帮我重构这个函数");
+	check("prompt 被投递", await waitFor(() => sentPrompts.length > beforePrompt));
+	check("用表情回复而非卡片", requests.filter((r) => r.url.includes("/robot/emotion/reply")).length > emotionBefore, requests.filter((r) => r.url.includes("/robot/emotion/reply")).length - emotionBefore);
+	check("没有发「已投递给 omp」卡片", !sessionReplies().slice(-3).some((r) => String(r.body?.markdown?.title ?? "").includes("已投递")));
 }
 
 console.log("\n[11] 静音开关");
@@ -709,6 +718,26 @@ console.log("\n[12] 会话事件 → 通知");
 	// reply "ℹ️ omp 本来就空闲", which would let this pass without the session_stop
 	// notification ever being delivered.
 	check("session_stop 触发空闲通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title) === "omp 空闲中")));
+
+	// A clean run reacts ✅ to the inbound message that drove it; a run that
+	// ended on an unrecovered error reacts ❌ instead. The stream already
+	// delivered live.robot() messages, so there is an inbound message to react to.
+	const reactions = (emoji: string) =>
+		requests.filter((r) => r.url.includes("/robot/emotion/reply") && r.body?.emotionName === emoji);
+	const okBefore = reactions("✅").length;
+	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 2, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "一切正常" }] }, session_id: "s1", stop_hook_active: false });
+	check("干净结束给用户消息打 ✅", await waitFor(() => reactions("✅").length > okBefore), reactions("✅").length);
+
+	const failBefore = reactions("❌").length;
+	await fire("auto_retry_end", { type: "auto_retry_end", success: false, finalError: "boom" });
+	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 3, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "失败了" }] }, session_id: "s1", stop_hook_active: false });
+	check("出错后给用户消息打 ❌", await waitFor(() => reactions("❌").length > failBefore), reactions("❌").length);
+
+	// The error flag must reset after it is consumed, or every later run would
+	// keep reacting ❌.
+	const okAgainBefore = reactions("✅").length;
+	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 4, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "恢复了" }] }, session_id: "s1", stop_hook_active: false });
+	check("❌ 标志用后重置，下次回到 ✅", await waitFor(() => reactions("✅").length > okAgainBefore), reactions("✅").length);
 }
 
 console.log("\n[13] dingtalk_notify 工具");
