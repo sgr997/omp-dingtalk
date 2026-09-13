@@ -429,6 +429,17 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	// The model re-issues the exact same call → the registry releases it once.
 	const [released] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve-rerun", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
 	check("批准后重发同命令放行", !released || released.block !== true, released);
+	// Registry-level one-shot semantics (release-once, unknown key).
+	{
+		const { ApprovalRegistry } = await import("../src/router.ts");
+		const r = new ApprovalRegistry({ debug() {}, info() {}, warn() {}, error() {} });
+		const freshKey = "bash\u0000{\"command\":\"echo once\"}";
+		const a = r.register({ toolName: "bash", reason: "t", detail: "d", key: freshKey, timeoutMs: 5_000, onTimeout: "deny" });
+		r.resolve(a.id, "approve");
+		check("批准的调用一次性放行（registry）", r.consumeApproved(freshKey) === true);
+		check("放行只生效一次（registry）", r.consumeApproved(freshKey) === false);
+		check("未批准的 key 不放行", r.consumeApproved("never-approved") === false);
+	}
 	const [other] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve-other", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/other" } });
 	check("放行是一次性的：不同命令仍被拦截", other?.block === true, other);
 }

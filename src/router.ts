@@ -26,11 +26,13 @@ export interface PendingApproval {
 interface PendingEntry extends PendingApproval {
 	/** Matches a re-issued call against the approval that released it. */
 	key: string;
+	/** How long the one-shot release stays valid after approval. */
+	timeoutMs: number;
 }
 
-/** Drop the internal bookkeeping field before handing an entry to callers. */
+/** Drop the internal bookkeeping fields before handing an entry to callers. */
 function publicApproval(entry: PendingEntry): PendingApproval {
-	const { key: _key, ...rest } = entry;
+	const { key: _key, timeoutMs: _timeoutMs, ...rest } = entry;
 	return rest;
 }
 
@@ -39,8 +41,13 @@ export class ApprovalRegistry {
 	#log: Logger;
 	#pending = new Map<string, PendingEntry>();
 	#latest: string | undefined;
-	/** Payload keys the user approved; released once on the next matching call. */
-	#approved = new Set<string>();
+	/**
+	 * Payload keys the user approved; released once on the next matching call.
+	 * Values are expiry timestamps — a release the model never picked up must
+	 * not stay valid indefinitely, or a much later call with identical
+	 * arguments would run without a fresh approval.
+	 */
+	#approved = new Map<string, number>();
 
 	constructor(logger: Logger) {
 		this.#log = logger;
@@ -83,6 +90,7 @@ export class ApprovalRegistry {
 		const entry: PendingEntry = {
 			id,
 			key: options.key,
+			timeoutMs: Math.max(5_000, options.timeoutMs),
 			toolName: options.toolName,
 			reason: options.reason,
 			detail: options.detail,
@@ -96,20 +104,21 @@ export class ApprovalRegistry {
 			if (this.#latest === id) this.#latest = undefined;
 			const decision: ApprovalDecision = options.onTimeout === "allow" ? "approve" : "timeout";
 			this.#log.info(`审批 ${id} 超时，按 ${options.onTimeout} 处理`);
-			if (decision === "approve") this.#approved.add(entry.key);
+			if (decision === "approve") this.#approved.set(entry.key, Date.now() + entry.timeoutMs);
 			options.onExpired?.(publicApproval(entry), decision);
-		}, Math.max(5_000, options.timeoutMs));
+		}, entry.timeoutMs);
 		timer.unref?.();
 
 		options.onRequested?.(publicApproval(entry));
 		return publicApproval(entry);
 	}
 
-	/** Release a previously approved call exactly once. */
+	/** Release a previously approved call exactly once, before its expiry. */
 	consumeApproved(key: string): boolean {
-		if (!this.#approved.has(key)) return false;
+		const expiresAt = this.#approved.get(key);
+		if (expiresAt === undefined) return false;
 		this.#approved.delete(key);
-		return true;
+		return Date.now() <= expiresAt;
 	}
 
 	/** Settle a request by explicit id, or the most recent one when id is omitted. */
@@ -123,7 +132,7 @@ export class ApprovalRegistry {
 		}
 		this.#pending.delete(id);
 		if (this.#latest === id) this.#latest = undefined;
-		if (decision === "approve") this.#approved.add(entry.key);
+		if (decision === "approve") this.#approved.set(entry.key, Date.now() + entry.timeoutMs);
 		return { ok: true, approval: publicApproval(entry) };
 	}
 
@@ -154,6 +163,7 @@ export class ApprovalRegistry {
 /** Minimal structural view of the injected extension API. */
 export interface ApiLike {
 	sendUserMessage: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void;
+	appendEntry?: (customType: string, data: unknown) => void;
 	setModel?: (model: unknown) => Promise<boolean>;
 	getActiveTools?: () => string[];
 	getSessionName?: () => string | undefined;

@@ -1204,8 +1204,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				const blocked = b.pushBlockedReason;
 				if (blocked) {
 					return {
-						content: [{ type: "text", text: `通知未发送：${blocked}` }],
-						details: { sent: false },
+						content: [{ type: "text" as const, text: `通知未发送：${blocked}` }],
+						details: { sent: false, errcode: undefined as number | undefined },
 						isError: true,
 					};
 				}

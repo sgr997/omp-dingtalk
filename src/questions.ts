@@ -60,7 +60,7 @@ export interface QuestionAnswerResult {
 
 interface PendingEntry extends PendingQuestion {
 	settle: (answer: QuestionAnswerPayload) => void;
-	onTimeout: () => void;
+	onTimeout: (question: PendingQuestion) => void;
 }
 
 /**
@@ -310,7 +310,7 @@ export class QuestionRegistry {
 		for (const entry of [...this.#pending.values()]) {
 			this.#log.info(`远程提问 ${entry.id} 因 ${reason} 取消`);
 			entry.settle({ id: entry.id, items: [], answeredBy: "", raw: "" });
-			entry.onTimeout();
+			entry.onTimeout(entry);
 		}
 		this.#pending.clear();
 		this.#latest = undefined;
