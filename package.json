@@ -8,8 +8,15 @@
     "test": "bun test/smoke.ts && bun test/verify-load.ts",
     "test:smoke": "bun test/smoke.ts",
     "test:load": "bun test/verify-load.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src test scripts",
     "doctor": "bun scripts/doctor.ts",
     "watch": "bun scripts/debug-stream.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "oxlint": "^0.16.0",
+    "typescript": "^5.9.0"
   },
   "omp": {
     "extensions": ["./src/index.ts"]

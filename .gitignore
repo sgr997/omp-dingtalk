@@ -3,6 +3,10 @@
 
 # Lock files from live runs (should never be committed)
 *.lock
+!bun.lock
+
+# Node / toolchain
+node_modules/
 
 # OS
 .DS_Store

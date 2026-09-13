@@ -23,7 +23,7 @@
  *    `/dingtalk takeover` (or `control.autoTakeover: true`), so DingTalk can
  *    never drive a session you are sitting in front of by accident.
  */
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI } from "./pi-types";
 import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
 import {
@@ -38,10 +38,8 @@ import {
 	fmtSessionStop,
 	fmtTakeoverSuccess,
 	fmtText,
-	fmtToolUse,
 	fmtTurnEnd,
 	formatApprovalTimeout,
-	formatQuestionInjection,
 	setSessionTag,
 	type Message,
 } from "./format";

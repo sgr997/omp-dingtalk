@@ -249,7 +249,7 @@ export class QuestionRegistry {
 
 		const entry: PendingEntry = {
 			...question,
-			settle: (answer) => {
+			settle: (_answer) => {
 				if (timer) clearTimeout(timer);
 				this.#pending.delete(id);
 				if (this.#latest === id) this.#latest = undefined;
@@ -307,6 +307,9 @@ export class QuestionRegistry {
 
 	/** Drop everything — used when the session goes away or takeover is released. */
 	clear(reason: string): void {
+		// Snapshot first: settle() deletes from the map, so iterating the live
+		// iterator would skip entries.
+		// oxlint-disable-next-line no-useless-spread
 		for (const entry of [...this.#pending.values()]) {
 			this.#log.info(`远程提问 ${entry.id} 因 ${reason} 取消`);
 			entry.settle({ id: entry.id, items: [], answeredBy: "", raw: "" });

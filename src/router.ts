@@ -11,7 +11,7 @@ import { fmtHelp, fmtQuestionAnswerEcho, fmtQuiet, fmtStatus, fmtText, formatApp
 import type { Logger } from "./logger";
 import { QuestionRegistry } from "./questions";
 import { robotMessageText, type RobotMessage } from "./stream";
-import { humanDuration, shortId, truncate } from "./util";
+import { shortId, truncate } from "./util";
 
 export type ApprovalDecision = "approve" | "deny" | "timeout";
 
@@ -138,7 +138,7 @@ export class ApprovalRegistry {
 
 	/** Drop every pending request — used when the session goes away. */
 	clear(reason: string): void {
-		for (const entry of [...this.#pending.values()]) {
+		for (const entry of this.#pending.values()) {
 			this.#log.info(`审批 ${entry.id} 因 ${reason} 自动拒绝`);
 		}
 		this.#pending.clear();

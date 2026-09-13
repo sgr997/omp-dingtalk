@@ -436,7 +436,9 @@ bun run doctor
 再跑单元/加载测试：
 
 ```bash
-bun run test
+bun run test        # 全量：smoke + 加载（smoke 纯 mock，加载需要本机已装 omp）
+bun run typecheck   # tsc 严格模式全量检查（0 错误）
+bun run lint        # oxlint（0 警告）
 ```
 
 - `test/smoke.ts` — 191 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。

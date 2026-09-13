@@ -744,7 +744,7 @@ console.log("\n[12] 会话事件 → 通知");
 	// every notification carries `目录名·随机短码`; and every webhook post is
 	// signed. (Previously asserted on the startup push, which no longer exists.)
 	const signedPost = requests.find((r) => r.url.includes("/robot/send?"));
-	check("webhook URL 带上了加签参数", signedPost?.url.includes("timestamp=") && signedPost?.url.includes("sign="), signedPost?.url);
+	check("webhook URL 带上了加签参数", Boolean(signedPost?.url.includes("timestamp=") && signedPost?.url.includes("sign=")), signedPost?.url);
 	const noteText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
 	check("通知带上了会话标识", noteText.includes(`omp · ${basename(process.cwd())}·`), noteText.slice(-90));
 
@@ -831,9 +831,9 @@ console.log("\n[13] dingtalk_notify 工具");
 console.log("\n[14] /dingtalk 本地命令");
 {
 	await commands.get("dingtalk").handler("test", ctx);
-	check("本地 test 子命令发送成功", notices.at(-1)?.includes("已发送测试消息"), notices.at(-1));
+	check("本地 test 子命令发送成功", (notices.at(-1)?.includes("已发送测试消息") ?? false), notices.at(-1));
 	await commands.get("dingtalk").handler("status", ctx);
-	check("本地 status 输出配置摘要", notices.at(-1)?.includes("入站 Stream"), notices.at(-1));
+	check("本地 status 输出配置摘要", (notices.at(-1)?.includes("入站 Stream") ?? false), notices.at(-1));
 }
 
 console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover");

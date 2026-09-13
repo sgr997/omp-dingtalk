@@ -328,23 +328,23 @@ function envOverrides(): Record<string, any> {
 	const env = process.env;
 	const out: Record<string, any> = {};
 
-	if (env.DINGTALK_WEBHOOK_URL) out.webhook = { ...(out.webhook ?? {}), url: env.DINGTALK_WEBHOOK_URL.trim() };
-	if (env.DINGTALK_WEBHOOK_SECRET) out.webhook = { ...(out.webhook ?? {}), secret: env.DINGTALK_WEBHOOK_SECRET.trim() };
-	if (env.DINGTALK_WEBHOOK_KEYWORD) out.webhook = { ...(out.webhook ?? {}), keyword: env.DINGTALK_WEBHOOK_KEYWORD.trim() };
+	if (env.DINGTALK_WEBHOOK_URL) out.webhook = { ...out.webhook, url: env.DINGTALK_WEBHOOK_URL.trim() };
+	if (env.DINGTALK_WEBHOOK_SECRET) out.webhook = { ...out.webhook, secret: env.DINGTALK_WEBHOOK_SECRET.trim() };
+	if (env.DINGTALK_WEBHOOK_KEYWORD) out.webhook = { ...out.webhook, keyword: env.DINGTALK_WEBHOOK_KEYWORD.trim() };
 
-	if (env.DINGTALK_CLIENT_ID) out.stream = { ...(out.stream ?? {}), clientId: env.DINGTALK_CLIENT_ID.trim() };
-	if (env.DINGTALK_CLIENT_SECRET) out.stream = { ...(out.stream ?? {}), clientSecret: env.DINGTALK_CLIENT_SECRET.trim() };
-	if (env.DINGTALK_ROBOT_CODE) out.stream = { ...(out.stream ?? {}), robotCode: env.DINGTALK_ROBOT_CODE.trim() };
+	if (env.DINGTALK_CLIENT_ID) out.stream = { ...out.stream, clientId: env.DINGTALK_CLIENT_ID.trim() };
+	if (env.DINGTALK_CLIENT_SECRET) out.stream = { ...out.stream, clientSecret: env.DINGTALK_CLIENT_SECRET.trim() };
+	if (env.DINGTALK_ROBOT_CODE) out.stream = { ...out.stream, robotCode: env.DINGTALK_ROBOT_CODE.trim() };
 	if (env.DINGTALK_STREAM_ENABLED) {
-		out.stream = { ...(out.stream ?? {}), enabled: /^(1|true|yes|on)$/i.test(env.DINGTALK_STREAM_ENABLED.trim()) };
+		out.stream = { ...out.stream, enabled: /^(1|true|yes|on)$/i.test(env.DINGTALK_STREAM_ENABLED.trim()) };
 	}
 
 	if (env.DINGTALK_OUTBOUND_MODE) {
-		out.outbound = { ...(out.outbound ?? {}), mode: env.DINGTALK_OUTBOUND_MODE.trim() };
+		out.outbound = { ...out.outbound, mode: env.DINGTALK_OUTBOUND_MODE.trim() };
 	}
 	if (env.DINGTALK_DIRECT_USER_IDS) {
 		out.outbound = {
-			...(out.outbound ?? {}),
+			...out.outbound,
 			directUserIds: env.DINGTALK_DIRECT_USER_IDS.split(",")
 				.map((id) => id.trim())
 				.filter(Boolean),
@@ -353,29 +353,29 @@ function envOverrides(): Record<string, any> {
 
 	if (env.DINGTALK_ALLOW_USER_IDS) {
 		out.control = {
-			...(out.control ?? {}),
+			...out.control,
 			allowUserIds: env.DINGTALK_ALLOW_USER_IDS.split(",")
 				.map((id) => id.trim())
 				.filter(Boolean),
 		};
 	}
 	if (env.DINGTALK_APPROVAL_MODE) {
-		out.approval = { ...(out.approval ?? {}), mode: env.DINGTALK_APPROVAL_MODE.trim() };
+		out.approval = { ...out.approval, mode: env.DINGTALK_APPROVAL_MODE.trim() };
 	}
 	if (env.DINGTALK_QUESTION_ENABLED) {
-		out.question = { ...(out.question ?? {}), enabled: /^(1|true|yes|on)$/i.test(env.DINGTALK_QUESTION_ENABLED.trim()) };
+		out.question = { ...out.question, enabled: /^(1|true|yes|on)$/i.test(env.DINGTALK_QUESTION_ENABLED.trim()) };
 	}
 	if (env.DINGTALK_QUESTION_TIMEOUT_MS) {
 		const parsed = Number(env.DINGTALK_QUESTION_TIMEOUT_MS.trim());
 		if (Number.isFinite(parsed) && parsed > 0) {
-			out.question = { ...(out.question ?? {}), timeoutMs: parsed };
+			out.question = { ...out.question, timeoutMs: parsed };
 		}
 	}
 	if (env.DINGTALK_CONTROL_SCOPE) {
-		out.control = { ...(out.control ?? {}), scope: env.DINGTALK_CONTROL_SCOPE.trim() };
+		out.control = { ...out.control, scope: env.DINGTALK_CONTROL_SCOPE.trim() };
 	}
 	if (env.DINGTALK_AUTO_TAKEOVER) {
-		out.control = { ...(out.control ?? {}), autoTakeover: /^(1|true|yes|on)$/i.test(env.DINGTALK_AUTO_TAKEOVER.trim()) };
+		out.control = { ...out.control, autoTakeover: /^(1|true|yes|on)$/i.test(env.DINGTALK_AUTO_TAKEOVER.trim()) };
 	}
 	if (env.DINGTALK_DISABLED && /^(1|true|yes|on)$/i.test(env.DINGTALK_DISABLED.trim())) {
 		out.enabled = false;
