@@ -55,7 +55,7 @@
 }
 ```
 
-- 收件人填**钉钉 userId**，也就是入站消息里的 `senderStaffId` —— 给机器人发 `/id` 就能拿到。
+- 收件人填**钉钉 userId**，也就是入站消息里的 `senderStaffId` —— 给机器人发 `/whoami` 就能拿到（`/id` 是别名）。
 - 懒得抄就留空 `directUserIds`，靠 `learnFromInbound`：**白名单里的人**给机器人发过消息后自动成为收件人（只认 `control.allowUserIds` 里的人，陌生人 DM 机器人不会把自己加进来）。
 - 应用侧还需要**机器人发送消息**权限，且收件人在应用的可见范围内；不满足会返回 403，`bun run doctor` 会把这条列出来。
 - 走 `direct` 时**不受**自定义机器人 20 条/分钟的限制。
@@ -144,7 +144,7 @@ bun run watch 60000    # 抓 60 秒
 
 > 钉钉**不一定会推 `REGISTERED` 帧**。连上却没有收到它，不代表配置有问题——只有真收到消息帧才算通。`bun run doctor` 已经把「能连上」判定为通过。
 
-全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/id`，把返回的 `senderStaffId` 填进 `control.allowUserIds`。
+全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/whoami`，把返回的 `senderStaffId` 填进 `control.allowUserIds`。
 
 
 <details>
@@ -203,7 +203,9 @@ cp config.example.json ~/.omp/dingtalk.json
 
 任何能触达机器人的 1:1 对话都能控制 omp 是危险的。让机器人告诉你自己的 ID：
 
-> 在**单聊**里给机器人发 `/id`
+> 在**单聊**里给机器人发 `/whoami`（`/id`、`我是谁` 也一样）
+
+这条指令**在配白名单之前就能用**——首次接入时你还没进 `allowUserIds`，机器人也会回复你的身份卡。
 
 把返回的 `senderStaffId` 填进 `control.allowUserIds`。留空则不做鉴权。
 （这个 ID 同时也是 `outbound.directUserIds` 要填的值。）
@@ -425,7 +427,7 @@ bun run test
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
 | 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
-| 收到「omp 已启动」但我不想要 | 它由 `notify.sessionStart` 控制，和接管**无关**（通知是纯出站，不需要接管）。想彻底安静用 `notify.onlyWhenTakenOver: true`；只想少一条消息就设 `sessionStart: false` |
+| 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
 | 设了 `direct` 但单聊收不到通知 | ① `stream.robotCode` 是否填了（`ding` 开头）② `outbound.directUserIds` 是否为空、或还没人在白名单里发过消息 ③ 应用是否有**机器人发送消息**权限、收件人是否在应用可见范围内 ④ `/dingtalk status` 看「出站通道」和「单聊收件人」两行 |
 | 通知还是发到群里 | `outbound.mode` 是不是 `webhook` 或 `both`。自定义机器人**只能发群**，要私聊必须用 `direct` |
 | 群里 @机器人 没反应 | 默认就是这样：`control.scope = "direct"` 时群聊消息一律忽略。要用群聊得显式改成 `group` / `all` |

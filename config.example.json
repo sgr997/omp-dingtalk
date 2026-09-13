@@ -32,7 +32,6 @@
   },
 
   "notify": {
-    "sessionStart": true,
     "sessionStop": true,
     "$comment_sessionStop": "本轮跑完、omp 空闲时通知你，这是最主要的「任务完成」提醒。",
     "sessionShutdown": true,

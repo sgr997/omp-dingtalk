@@ -54,6 +54,33 @@ function codeBlock(body: string): string {
 	return `\`\`\`\n${fenceSafe(truncate(body, 1400))}\n\`\`\``;
 }
 
+/**
+ * An OMP reply, rendered as native DingTalk markdown.
+ *
+ * Must NOT go through `codeBlock`: DingTalk turns a fence into a monospace grey
+ * box that parses nothing, so a normal model reply (headings, bold labels,
+ * lists) arrives as raw markdown source. DingTalk also glues two adjacent
+ * non-empty lines into one paragraph (a single newline is a soft break), so
+ * every line gets a blank line after it — except inside a fenced code block
+ * (kept verbatim) and before an indented continuation line (which belongs to
+ * the list item above it).
+ */
+function replyBlock(body: string): string {
+	const lines = truncate(body, 1400).split("\n");
+	const out: string[] = [];
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (/^```/.test(line.trim())) inFence = !inFence;
+		out.push(line);
+		if (inFence) continue;
+		const next = lines[i + 1];
+		if (line.trim() === "" || next === undefined || next.trim() === "" || /^\s/.test(next)) continue;
+		out.push("");
+	}
+	return out.join("\n");
+}
+
 /** Where inbound control stands, in one line the user can act on. */
 function controlHint(control: "active" | "inert" | "off", scope: "direct" | "group" | "all"): string {
 	if (control === "off") return "本会话只推送通知，入站控制已关闭（`control.enabled: false`）。";
@@ -68,28 +95,31 @@ function controlHint(control: "active" | "inert" | "off", scope: "direct" | "gro
 	return `已接管：直接在${where}发消息即可指挥它；发 **帮助** 看指令表。`;
 }
 
-export function fmtSessionStart(info: {
+/**
+ * Push confirmation for a takeover that was asked for at the terminal.
+ *
+ * Deliberately *not* sent on `session_start`: an omp launch is ordinary, and a
+ * DingTalk ping for every new session is noise. Handing control over is the
+ * event worth announcing — especially when it preempted another session, which
+ * otherwise looks like DingTalk silently stopped working over there.
+ */
+export function fmtTakeoverSuccess(info: {
 	cwd: string;
-	model?: string;
-	sessionName?: string;
-	sources?: string[];
-	warnings?: string[];
-	/** `active` = DingTalk already drives this session; `inert` = waiting for a takeover; `off` = inbound disabled. */
-	control?: "active" | "inert" | "off";
-	scope?: "direct" | "group" | "all";
+	scope: "direct" | "group" | "all";
+	preempted?: { cwd: string; pid: number };
+	releaseSeconds?: number;
 }): Message {
-	const lines = [
-		`## 🚀 omp 已启动`,
-		``,
-		`- **目录**: \`${truncatePath(info.cwd, 120)}\``,
-		`- **模型**: ${info.model ? `\`${info.model}\`` : "(未知)"}`,
-	];
-	if (info.sessionName) lines.push(`- **会话**: ${truncate(info.sessionName, 80)}`);
-	if (info.warnings?.length) {
-		lines.push(``, `> ⚠️ ${info.warnings.map((w) => truncate(w, 160)).join("\n> ")}`);
+	const lines = [`## 🎧 钉钉已接管本会话`, ``, `- **目录**: \`${truncatePath(info.cwd, 120)}\``];
+	if (info.preempted) {
+		lines.push(
+			``,
+			`> 已从另一个会话手里抢占（\`${truncatePath(info.preempted.cwd || "?", 80)}\` · PID ${info.preempted.pid}）${
+				info.releaseSeconds ? `，它会在 ${info.releaseSeconds} 秒内自动释放` : ""
+			}。`,
+		);
 	}
-	lines.push(``, controlHint(info.control ?? "inert", info.scope ?? "direct"));
-	return { title: "omp 已启动", text: lines.join("\n") + footer() };
+	lines.push(``, controlHint("active", info.scope), footer());
+	return { title: "钉钉已接管", text: lines.join("\n") };
 }
 
 export function fmtSessionStop(info: {
@@ -109,7 +139,7 @@ export function fmtSessionStop(info: {
 
 	const text = (info.text ?? "").trim();
 	if (text) {
-		lines.push(``, `**最后一条回复**`, codeBlock(text));
+		lines.push(``, `**最后一条回复**`, ``, replyBlock(text));
 	}
 	lines.push(``, `> 若已执行 \`/dingtalk takeover\`，在钉钉里回复即可继续指挥它。`);
 	return { title: "omp 空闲中", text: lines.join("\n") + footer() };
@@ -119,7 +149,7 @@ export function fmtTurnEnd(info: { turnIndex: number; durationMs: number; text?:
 	const lines = [`## ⏱ 第 ${info.turnIndex + 1} 轮完成`, ``, `- **耗时**: ${humanDuration(info.durationMs)}`];
 	if (info.tools?.length) lines.push(`- **调用工具**: ${info.tools.map((t) => `\`${t}\``).join(", ")}`);
 	const text = (info.text ?? "").trim();
-	if (text) lines.push(``, codeBlock(text));
+	if (text) lines.push(``, `**回复**`, ``, replyBlock(text));
 	return { title: `第 ${info.turnIndex + 1} 轮完成`, text: lines.join("\n") + footer() };
 }
 
@@ -144,7 +174,7 @@ export function fmtApprovalRequest(info: {
 		`**具体操作**`,
 		codeBlock(info.detail),
 		``,
-		`回复 **同意** 或 **拒绝**（也可用 \`/approve ${info.id}\` / \`/deny ${info.id}\`）。`,
+		`回复 **同意** 或 **拒绝**（也可用 \`/approve ${info.id}\` 或 \`/deny ${info.id}\`）。`,
 		`> ${Math.round(info.timeoutMs / 1000)}s 内没有回复则按配置的默认策略处理。`,
 	);
 	return { title: `需要批准：${info.toolName}`, text: lines.join("\n") };
@@ -340,29 +370,29 @@ export function fmtHelp(): Message {
 		`> 且需要先在 omp 里执行 \`/dingtalk takeover\`，否则不会有任何反应。`,
 		``,
 		`**查看状态**`,
-		`- \`状态\` / \`/status\` — 会话、模型、待审批、队列`,
+		`- \`状态\` 或 \`/status\` — 会话、模型、待审批、队列`,
 		`- \`/tools\` — 当前启用的工具`,
-		`- \`/help\` / \`帮助\` — 这张表`,
+		`- \`/help\` 或 \`帮助\` — 这张表`,
 		``,
 		`**控制执行**`,
 		`- 直接发任意文字 — 作为新指令喂给 omp（流式中会打断当前轮次）`,
 		`- \`/follow <文字>\` — 等当前轮次跑完再执行`,
-		`- \`/stop\` / \`停止\` — 中断当前执行`,
+		`- \`/stop\` 或 \`停止\` — 中断当前执行`,
 		`- \`/compact [说明]\` — 压缩上下文`,
 		`- \`/model <模型名>\` — 切换模型，如 \`/model opus\``,
 		``,
 		`**审批**`,
-		`- \`同意\` / \`/approve [编号]\` — 批准（不写编号则批准最新一条）`,
-		`- \`拒绝\` / \`/deny [编号]\` — 拒绝`,
+		`- \`同意\` 或 \`/approve [编号]\` — 批准（不写编号则批准最新一条）`,
+		`- \`拒绝\` 或 \`/deny [编号]\` — 拒绝`,
 		``,
 		`**远程提问**`,
 		`- 收到“❓ 需要你的回答”后直接回复选项号（如 \`2\`），多选 \`2,4\`，也可回文字`,
 		`- 多问题用 \`1:2 2:1\` 逐条回答；数字在钉钉里必须单独发送`,
 		``,
 		`**通知开关**`,
-		`- \`/quiet on\` / \`/quiet off\` — 静音 / 恢复通知`,
+		`- \`/quiet on\` 或 \`/quiet off\` — 静音或恢复通知`,
 		`- \`/ping\` — 测试连通性`,
-		`- \`/id\` — 查看自己的 senderStaffId（用于配置白名单）`,
+		`- \`/whoami\` 或 \`/id\` — 查看自己的 senderStaffId（配白名单/首次接入用，未授权也能查）`,
 	].join("\n");
 	return { title: "omp 机器人指令", text };
 }

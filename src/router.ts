@@ -173,6 +173,7 @@ const STOP_WORDS = new Set(["stop", "abort", "cancel", "停止", "中断", "取�
 const STATUS_WORDS = new Set(["status", "状态"]);
 const HELP_WORDS = new Set(["help", "?", "h", "帮助", "菜单"]);
 const TOOLS_WORDS = new Set(["tools", "工具"]);
+const IDENTITY_WORDS = new Set(["id", "whoami", "我是谁"]);
 
 export class CommandRouter {
 	#deps: RouterDeps;
@@ -211,6 +212,16 @@ export class CommandRouter {
 		}
 
 		const senderId = message.senderStaffId || message.senderId || "";
+
+		// Identity answers *before* the allowlist: learning your own staffId is
+		// the first step of onboarding, at a time when you are not in the list
+		// yet. A stranger only learns their own id back, nothing else.
+		const identityWord = (text.split(/\s+/)[0] ?? "").toLowerCase().replace(/^\//, "");
+		if (IDENTITY_WORDS.has(identityWord)) {
+			await this.#handleId(message, senderId);
+			return;
+		}
+
 		const allow = cfg.control.allowUserIds;
 		if (allow.length > 0 && !allow.includes(senderId)) {
 			log.warn("拒绝未授权指令", { senderId, nick: message.senderNick });
@@ -481,7 +492,7 @@ export class CommandRouter {
 					`- **会话类型**: ${message.conversationType === "1" ? "单聊" : "群聊"}`,
 					`- **会话 ID**: \`${truncate(message.conversationId ?? "", 80)}\``,
 					``,
-					`把 senderStaffId 填进 \`control.allowUserIds\` 即可锁定只有你能控制。`,
+					`> 首次接入还没配白名单时也能用——把这个 ID 填进 \`control.allowUserIds\` 即可锁定只有你能控制。`,
 					scope === "direct"
 						? `当前 \`control.scope = "direct"\`，只有单聊消息会被处理。`
 						: `当前 \`control.scope = "${scope}"\`。`,

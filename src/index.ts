@@ -33,8 +33,8 @@ import {
 	fmtQuestionBlocked,
 	fmtQuestionRequest,
 	fmtQuestionTimeout,
-	fmtSessionStart,
 	fmtSessionStop,
+	fmtTakeoverSuccess,
 	fmtText,
 	fmtToolUse,
 	fmtTurnEnd,
@@ -723,27 +723,29 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			// the session waits for an explicit `/dingtalk takeover`.
 			if (b.cfg.control.autoTakeover) {
 				const result = b.takeOver();
-				if (!result.ok) b.log.warn(`自动接管失败：${result.reason}`);
+				if (!result.ok) {
+					b.log.warn(`自动接管失败：${result.reason}`);
+				} else {
+					b.notify(
+						fmtTakeoverSuccess({
+							cwd: b.cwd,
+							scope: b.cfg.control.scope,
+							preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
+							releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
+						}),
+						{ priority: "high", bypassQuiet: true, bypassTakeover: true },
+					);
+				}
 			} else if (b.takenOver) {
 				b.release();
 				b.log.info("新会话不再继承钉钉接管（control.autoTakeover = false）");
 			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
 				b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
 			}
-
-			if (b.cfg.notify.sessionStart) {
-				b.notify(
-					fmtSessionStart({
-						cwd: ctx?.cwd ?? process.cwd(),
-						model: ctx?.model ? `${ctx.model.provider ?? "?"}/${ctx.model.id ?? "?"}` : undefined,
-						sessionName: pi.getSessionName?.(),
-						warnings: b.warnings,
-						control: !b.cfg.enabled || !b.cfg.control.enabled ? "off" : b.takenOver ? "active" : "inert",
-						scope: b.cfg.control.scope,
-					}),
-					{ priority: "normal", dedupeKey: "session-start" },
-				);
-			}
+			// No startup notification on purpose: a launch is ordinary, and a
+			// DingTalk ping for every new session is noise. Takeover — whether
+			// automatic (`control.autoTakeover`) or via `/dingtalk takeover` —
+			// is the event worth announcing, and it pushes its own confirmation.
 		}),
 	);
 
@@ -1014,6 +1016,20 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 							: `无法接管：${result.reason}`,
 						result.ok ? "info" : "error",
 					);
+					// Takeover is the moment DingTalk actually gains control, so it
+					// is worth a push — this is the only "handed over" signal the
+					// phone gets when the session was launched with autoTakeover off.
+					if (result.ok) {
+						b.notify(
+							fmtTakeoverSuccess({
+								cwd: b.cwd,
+								scope: b.cfg.control.scope,
+								preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
+								releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
+							}),
+							{ priority: "high", bypassQuiet: true, bypassTakeover: true },
+						);
+					}
 					return;
 				}
 

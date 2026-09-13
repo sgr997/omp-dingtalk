@@ -60,7 +60,6 @@ export interface OutboundConfig {
 }
 
 export interface NotifyConfig {
-	sessionStart: boolean;
 	turnEnd: {
 		enabled: boolean;
 		/** Only notify for turns that ran at least this long. */
@@ -235,7 +234,6 @@ const DEFAULTS: DingTalkConfig = {
 	stream: { enabled: false, clientId: "", clientSecret: "", robotCode: "" },
 	outbound: { mode: "webhook", directUserIds: [], learnFromInbound: true },
 	notify: {
-		sessionStart: true,
 		turnEnd: { enabled: false, minDurationMs: 60_000 },
 		sessionStop: true,
 		sessionShutdown: true,

@@ -287,15 +287,11 @@ check("注册了 session_stop", handlers.has("session_stop"));
 check("注册了 /dingtalk 命令", commands.has("dingtalk"));
 check("注册了 dingtalk_notify 工具", tools.has("dingtalk_notify"));
 
-console.log("\n[2] session_start → 通知 + Stream 建连");
+console.log("\n[2] session_start → 无启动通知 + Stream 建连 + autoTakeover 推送接管确认");
 await fire("session_start", { type: "session_start" });
-check("发出了会话启动通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title).includes("已启动"))), requests.length);
-check("启动通知写明已接管（autoTakeover: true）", String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("已接管"), String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 200));
-check("webhook URL 带上了加签参数", webhookPosts()[0]?.url.includes("timestamp=") && webhookPosts()[0]?.url.includes("sign="));
-// Two sessions sharing one DingTalk account must still be tellable apart, so
-// every notification carries `目录名·随机短码`.
-const startText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
-check("启动通知带上了会话标识", startText.includes(`omp · ${basename(process.cwd())}·`), startText.slice(-90));
+check("启动不再推送「omp 已启动」", !webhookPosts().some((r) => String(r.body?.markdown?.title).includes("已启动")), webhookPosts().length);
+check("autoTakeover 成功后推送「钉钉已接管」", webhookPosts().some((r) => String(r.body?.markdown?.title).includes("钉钉已接管")), webhookPosts().filter((r) => String(r.body?.markdown?.title).includes("钉钉已接管")).length);
+check("接管推送带上了目录", String(webhookPosts().find((r) => String(r.body?.markdown?.title).includes("钉钉已接管"))?.body?.markdown?.text ?? "").includes("目录"));
 check("Stream 已请求接入点", await waitFor(() => requests.some((r) => r.url.includes("/gateway/connections/open"))));
 const socket = await (async () => {
 	await waitFor(() => MockSocket.instances.length > 0);
@@ -318,6 +314,21 @@ check("CALLBACK 的 ACK 形如 {response:{}}（与官方 SDK 一致）", socket.
 
 // Compatibility path: some SDK builds / older docs base64-encode `data`.
 const beforeB64 = sessionReplies().length;
+	// /whoami is the onboarding path, so it must work for any sender — here with
+	// the permissive config, and in [5] for a sender outside the allowlist.
+	const beforeWhoami = sessionReplies().length;
+	socket.robot("/whoami");
+	await waitFor(() => sessionReplies().length > beforeWhoami);
+	check("`/whoami` 返回身份卡片", String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("你的身份"), sessionReplies().at(-1)?.body?.markdown?.title);
+	check("身份卡片带 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"), sessionReplies().at(-1)?.body?.markdown?.text);
+	const beforeId = sessionReplies().length;
+	socket.robot("/id");
+	await waitFor(() => sessionReplies().length > beforeId);
+	check("`/id` 同样返回身份卡片", String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("你的身份"), sessionReplies().at(-1)?.body?.markdown?.title);
+	const beforeIdCN = sessionReplies().length;
+	socket.robot("我是谁");
+	await waitFor(() => sessionReplies().length > beforeIdCN);
+	check("`我是谁` 也识别为身份查询", String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("你的身份"), sessionReplies().at(-1)?.body?.markdown?.title);
 socket.frame({
 	specVersion: "1.0",
 	type: "CALLBACK",
@@ -358,12 +369,22 @@ console.log("\n[5] 白名单鉴权");
 		JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserIds: ["someone-else"] } }),
 	);
 	await fire("session_start", { type: "session_start" });
-	const before = sessionReplies().length;
 	const latest = MockSocket.instances.at(-1)!;
 	latest.open();
 	latest.system("REGISTERED");
+
+	// The whole point of /whoami: a first-time user is *not* in the list yet.
+	const sentBefore = sentPrompts.length;
+	const beforeId = sessionReplies().length;
+	latest.robot("/whoami");
+	check("白名单外的发送者也能查身份", await waitFor(() => sessionReplies().length > beforeId));
+	check("返回身份卡片而不是拒绝提示", String(sessionReplies().at(-1)?.body?.markdown?.title ?? "").includes("你的身份"), sessionReplies().at(-1)?.body?.markdown?.title);
+	check("身份卡片带 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"), sessionReplies().at(-1)?.body?.markdown?.text);
+	check("身份查询不会把消息喂给 omp", sentPrompts.length === sentBefore, sentPrompts.length - sentBefore);
+
+	const before = sessionReplies().length;
 	latest.robot("状态");
-	check("白名单外的发送者被拒绝", await waitFor(() => sessionReplies().length > before));
+	check("白名单外的其他指令被拒绝", await waitFor(() => sessionReplies().length > before));
 	check("拒绝提示包含 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"));
 }
 
@@ -653,6 +674,36 @@ console.log("\n[12] 会话事件 → 通知");
 	check("turn_end 触发通知", await waitFor(() => webhookPosts().length > before));
 	check("通知里包含最后回复", String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("已修好登录接口"));
 
+	// Two sessions sharing one DingTalk account must still be tellable apart, so
+	// every notification carries `目录名·随机短码`; and every webhook post is
+	// signed. (Previously asserted on the startup push, which no longer exists.)
+	const signedPost = requests.find((r) => r.url.includes("/robot/send?"));
+	check("webhook URL 带上了加签参数", signedPost?.url.includes("timestamp=") && signedPost?.url.includes("sign="), signedPost?.url);
+	const noteText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
+	check("通知带上了会话标识", noteText.includes(`omp · ${basename(process.cwd())}·`), noteText.slice(-90));
+
+	// The reply must render as markdown, not as a fenced code block: a fence makes
+	// DingTalk show the raw source in a monospace grey box.
+	await fire("turn_end", {
+		type: "turn_end",
+		turnIndex: 2,
+		message: {
+			role: "assistant",
+			content: [
+				{
+					type: "text",
+					text: "**方案**\n先跑测试\n再改代码\n```bash\necho hi\n```\n- 第一项\n- 第二项",
+				},
+			],
+		},
+		toolResults: [],
+	});
+	const replyReady = await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("**方案**"));
+	const replyText = replyReady ? String(webhookPosts().at(-1)?.body?.markdown?.text ?? "") : "";
+	check("回复按 markdown 渲染（无外层代码围栏）", String(replyText ?? "").includes("**回复**\n\n**方案**"), replyText);
+	check("回复保留内层代码块", String(replyText ?? "").includes("```bash\necho hi\n```"), replyText);
+	check("相邻普通行用空行分段", String(replyText ?? "").includes("先跑测试\n\n再改代码"), replyText);
+
 	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 1, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "全部完成" }] }, session_id: "s1", stop_hook_active: false });
 	// Match the exact title: a loose `includes("空闲")` also matches the `/stop`
 	// reply "ℹ️ omp 本来就空闲", which would let this pass without the session_stop
@@ -692,17 +743,13 @@ console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover");
 	const before = connects();
 	await tick(300);
 	check("autoTakeover=false 时不建立入站连接", connects() === before, connects() - before);
-	const startPost = webhookPosts()
-		.slice(postsBefore)
-		.find((r) => String(r.body?.markdown?.title).includes("已启动"));
-	check(
-		"启动通知提示尚未接管",
-		String(startPost?.body?.markdown?.text ?? "").includes("尚未接管"),
-		String(startPost?.body?.markdown?.text ?? "(本次 session_start 没有发出启动通知)").slice(0, 300),
-	);
+	const postsAtStart = webhookPosts().slice(postsBefore);
+	check("未接管时启动也不推送任何消息", !postsAtStart.some((r) => String(r.body?.markdown?.title).includes("已启动")), postsAtStart.length);
 
 	await commands.get("dingtalk").handler("takeover", ctx);
 	check("takeover 提示已接管", String(notices.at(-1) ?? "").includes("已接管"), notices.at(-1));
+	check("钉钉收到接管成功推送", await waitFor(() => webhookPosts().slice(postsBefore).some((r) => String(r.body?.markdown?.title).includes("钉钉已接管"))), webhookPosts().slice(postsBefore).map((r) => r.body?.markdown?.title).slice(-3));
+	check("接管推送带上了目录和提示", String(webhookPosts().slice(postsBefore).filter((r) => String(r.body?.markdown?.title).includes("钉钉已接管")).at(-1)?.body?.markdown?.text ?? "").includes("目录") && String(webhookPosts().slice(postsBefore).filter((r) => String(r.body?.markdown?.title).includes("钉钉已接管")).at(-1)?.body?.markdown?.text ?? "").includes("发消息即可指挥它"), String(webhookPosts().slice(postsBefore).filter((r) => String(r.body?.markdown?.title).includes("钉钉已接管")).at(-1)?.body?.markdown?.text ?? ""));
 	check("takeover 后才开始建连", await waitFor(() => connects() > before));
 	check(
 		"接管后 socket 已建立",
@@ -832,7 +879,12 @@ console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
 	await tick(200);
 	const beforeGroup = groupPosts().length;
 	const beforeOto = otoPosts().length;
-	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
+	// Startup is silent by design, so trigger a real notification via the
+	// session-end (idle) path instead.
+	await localHandlers.get("session_stop")![0](
+		{ type: "session_stop", last_assistant_message: { role: "assistant", content: [{ type: "text", text: "跑完了" }] } },
+		localCtx,
+	);
 
 	check("单聊模式下确实发出了 1:1 推送", await waitFor(() => otoPosts().length > beforeOto), otoPosts().length - beforeOto);
 	check("单聊模式下不再往群里发", groupPosts().length === beforeGroup, groupPosts().length - beforeGroup);
@@ -875,7 +927,12 @@ console.log("\n[20] outbound.mode = both 时两条通道都发");
 
 	const beforeGroup = groupPosts().length;
 	const beforeOto = otoPosts().length;
-	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+	// Startup is silent by design, so trigger a real notification via the
+	// session-end (idle) path instead.
+	await localHandlers.get("session_stop")![0](
+		{ type: "session_stop", last_assistant_message: { role: "assistant", content: [{ type: "text", text: "跑完了" }] } },
+		ctx,
+	);
 
 	check("both 模式发出了群通知", await waitFor(() => groupPosts().length > beforeGroup), groupPosts().length - beforeGroup);
 	check("both 模式同时发出了单聊推送", await waitFor(() => otoPosts().length > beforeOto), otoPosts().length - beforeOto);
@@ -1041,7 +1098,7 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 
 	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
 	await tick(250);
-	check("未接管时不发启动通知", groupPosts().length === baseline, groupPosts().length - baseline);
+	check("未接管时保持静默（启动本来就不推送，自然也没有启动通知）", groupPosts().length === baseline, groupPosts().length - baseline);
 
 	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
 	await tick(250);
