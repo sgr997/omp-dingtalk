@@ -395,9 +395,11 @@ const live = MockSocket.instances.at(-1)!;
 live.open();
 live.system("REGISTERED");
 
-console.log("\n[6] 远程审批：批准");
+console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 {
-	const pending = fire("tool_call", { type: "tool_call", toolCallId: "t-approve", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
+	const [blocked] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
+	check("危险命令被拦截等待审批", blocked?.block === true, blocked);
+	check("拦截原因说明已推送钉钉", String(blocked?.reason ?? "").includes("钉钉"), blocked?.reason);
 	check("危险命令触发了审批通知", await waitFor(() => approvalPosts().length >= 1));
 	const id = /`([A-Z0-9]{4,})`/.exec(String(approvalPosts().at(-1)?.body?.markdown?.text ?? ""))?.[1] ?? "";
 	check("审批通知里带了编号", Boolean(id), id);
@@ -408,26 +410,40 @@ console.log("\n[6] 远程审批：批准");
 		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").includes(`来自**: \`${basename(process.cwd())}·`),
 		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 200),
 	);
+	// While pending, a re-issued call is still blocked (deduped, no re-notify).
+	const [again] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve-again", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
+	check("批准前重发仍被拦截", again?.block === true, again);
+	const sentBefore = sentPrompts.length;
 	live.robot("同意");
-	const [result] = await pending;
-	check("批准后放行（无 block）", !result || result.block !== true, result);
+	check("批准后向 omp 注入放行指令", await waitFor(() => sentPrompts.length > sentBefore));
+	check("注入消息提到批准", String(sentPrompts.at(-1)?.text ?? "").includes("批准"), sentPrompts.at(-1)?.text);
+	// The model re-issues the exact same call → the registry releases it once.
+	const [released] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve-rerun", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/x" } });
+	check("批准后重发同命令放行", !released || released.block !== true, released);
+	const [other] = await fire("tool_call", { type: "tool_call", toolCallId: "t-approve-other", toolName: "bash", input: { command: "sudo rm -rf /var/tmp/other" } });
+	check("放行是一次性的：不同命令仍被拦截", other?.block === true, other);
 }
 
 console.log("\n[7] 远程审批：拒绝");
 {
-	const pending = fire("tool_call", { type: "tool_call", toolCallId: "t-deny", toolName: "bash", input: { command: "git push --force origin main" } });
+	const [blocked] = await fire("tool_call", { type: "tool_call", toolCallId: "t-deny", toolName: "bash", input: { command: "git push --force origin main" } });
+	check("危险命令被拦截等待审批", blocked?.block === true, blocked);
 	await waitFor(() => approvalPosts().length >= 2);
+	const sentBefore = sentPrompts.length;
 	live.robot("拒绝");
-	const [result] = await pending;
-	check("拒绝后拦截执行", result?.block === true, result);
-	check("拦截原因提到远程拒绝", String(result?.reason ?? "").includes("拒绝"), result?.reason);
+	check("拒绝后向 omp 注入拒绝指令", await waitFor(() => sentPrompts.length > sentBefore));
+	check("注入消息提到拒绝", String(sentPrompts.at(-1)?.text ?? "").includes("拒绝"), sentPrompts.at(-1)?.text);
+	const [rerun] = await fire("tool_call", { type: "tool_call", toolCallId: "t-deny-rerun", toolName: "bash", input: { command: "git push --force origin main" } });
+	check("拒绝后重发仍被拦截", rerun?.block === true, rerun);
 }
 
 console.log("\n[8] 远程审批：超时按安全默认拒绝");
 {
-	const [result] = await fire("tool_call", { type: "tool_call", toolCallId: "t-timeout", toolName: "bash", input: { command: "rm -rf /" } });
-	check("超时后拦截执行", result?.block === true, result);
-	check("拦截原因提到超时", String(result?.reason ?? "").includes("超时"), result?.reason);
+	const sentBefore = sentPrompts.length;
+	const [blocked] = await fire("tool_call", { type: "tool_call", toolCallId: "t-timeout", toolName: "bash", input: { command: "rm -rf /" } });
+	check("超时前先拦截", blocked?.block === true, blocked);
+	check("超时后注入安全默认拒绝", await waitFor(() => sentPrompts.length > sentBefore, 8_000));
+	check("注入消息提到超时", String(sentPrompts.at(-1)?.text ?? "").includes("超时"), sentPrompts.at(-1)?.text);
 }
 
 console.log("\n[9] 普通命令不应被拦截");

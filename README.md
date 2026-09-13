@@ -234,6 +234,15 @@ omp --approval-mode=yolo
 
 效果：omp 自己一路跑，**只有命中危险规则的操做才会停下来问你**，你在钉钉单聊里回「同意」就继续。
 
+审批的运作方式（和 omp 的 handler 超时有关）：
+
+1. 命中规则的工具调用被**立即拦截**（`block: true`），模型被告知「已推送到钉钉，结束本轮等待」。
+2. 你在钉钉回「同意」后，插件把决定**注入**成一条新消息（「已批准，请原样重发」），模型重新发起同一个调用。
+3. 重发的调用按**参数完全相同**匹配，一次性放行——只放这一次，换个参数会重新走审批。
+4. `approval.timeoutMs` 内没回复，按 `onTimeout` 处理并注入结果，会话不会被挂住。
+
+> 为什么不是「处理器里等着你回复」：omp 会在 `extensionHandlers.toolCallTimeoutMs`（默认 30 秒）后中止 handler 并拦截该调用。如果在这里 await 人类回复，超过 30 秒才回的「同意」就再也放行不了工具了。所以采用「立即拦截 + 批准后重发」。
+
 内置危险规则（`approval.rules` 留空时生效）：
 
 - `bash`：`rm -rf`、`sudo`、`git push`、`git reset --hard`、`git clean -fd`、`DROP TABLE/DATABASE`、`npm publish`、`curl|sh`、`chmod 777`、`mkfs`、`dd if=`、`shutdown`、`kill -9`
@@ -385,7 +394,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
                     ┌───────▼──────────────▼───────┐
                     │        src/index.ts          │
                     │  session/turn/tool_call 事件  │
-                    │  ↕ 远程审批闸门（tool_call 挂起）│
+                    │  ↕ 审批闸门（命中规则即拦截）  │
                     └───────┬──────────────────────┘
                             │
                     src/router.ts  指令解析 / 鉴权
@@ -405,7 +414,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 
 ### 关键设计取舍
 
-- **失败安全但不硬卡**：审批超时默认按 `deny` 处理（fail-closed）；但如果**没有任何可用的出站通道**（没法联系到人），闸门会主动放行并告警，而不是让 agent 白等 5 分钟。
+- **失败安全但不硬卡**：审批超时默认按 `deny` 处理（fail-closed）；但如果**没有任何可用的出站通道**（没法联系到人），闸门会主动放行并告警，而不是让模型白等一场。拦截时 handler **同步返回** `block`，不 await 人类——omp 只给 handler `toolCallTimeoutMs`（默认 30 秒），在里面等几分钟的审批必被中止。批准后由模型重发同一调用，注册表一次性放行。
 - **绝不拖垮会话**：OMP 扩展与宿主同进程，未捕获的异常会杀掉整个会话。所有事件处理器、定时器、WebSocket 回调都做了包裹。
 - **先 ACK 再处理**：Stream 服务端约 60 秒重投未应答的消息，而远程审批可能要等好几分钟。所以入站帧先回 ACK，再用 `messageId` 去重兜住重投。
 - **重载配置不重建发送器**：`refreshConfig()` 用 `updateConfig()` 原地换配置。重建实例会重置限流窗口（可能撞上钉钉 20 条/分钟被封 10 分钟），而且老实例并行排空积压会让通知乱序。
@@ -430,7 +439,7 @@ bun run doctor
 bun run test
 ```
 
-- `test/smoke.ts` — 169 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
+- `test/smoke.ts` — 178 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -460,8 +469,8 @@ bun run test
 | 收到「❓ 需要你的回答」怎么答 | 直接回复选项号（单选 `2`、多选 `2,4`、多问题 `1:2 2:1`），回复选项文字也可以，任意其它文字当作自定义答案 |
 | 没收到提问推送 | ① 是否已 `/dingtalk takeover`（未接管时不转发）② `question.enabled` 是否为 false ③ 检查提问工具是否真的被模型调用（看 omp 会话里有没有「提问」块）④ `/dingtalk status` 看「待回答提问」 |
 | 提问一直没人答会怎样 | 到 `question.timeoutMs`（默认 10 分钟）后告知 omp 自行决定，不会永久卡住 |
-| 日志出现 `handler timed out after 2000ms` | omp 对事件处理器有 **2 秒**硬限制。退出通知已把上限压到 1.5 秒；如果你在改代码时新增了阻塞调用，要把它移出 handler |
-| 远程审批（`approval.mode: remote`）到底能不能拦住 | **未实测**。omp 只给 handler 2 秒，而审批要等你回消息，两者可能冲突——正式启用前建议先拿一条无害的危险命令试一次，确认拦截真的生效 |
+| 日志出现 `handler timed out after …ms` | omp 对 `tool_call` 处理器有 `extensionHandlers.toolCallTimeoutMs`（默认 **30 秒**）上限，超时会中止并拦截该调用；退出通知单独把上限压到 1.5 秒。新增阻塞调用要移出 handler，或改成「立即返回 + 异步注入」 |
+| 远程审批（`approval.mode: remote`）没生效 | 三件事都满足才会拦截：`approval.mode` 为 `remote`、已 `/dingtalk takeover`、出站通道可用。缺任一条件闸门会主动放行并在日志告警 |
 
 `omp plugin doctor --fix` 可以修掉 `package_manifest: Not created yet` 这个无害告警。
 

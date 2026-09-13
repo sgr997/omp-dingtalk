@@ -27,7 +27,9 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
 import {
+	fmtApprovalBlocked,
 	fmtApprovalRequest,
+	fmtApprovalResolved,
 	fmtError,
 	fmtHelp,
 	fmtQuestionBlocked,
@@ -38,13 +40,14 @@ import {
 	fmtText,
 	fmtToolUse,
 	fmtTurnEnd,
+	formatApprovalTimeout,
 	formatQuestionInjection,
 	setSessionTag,
 	type Message,
 } from "./format";
 import { createLogger, type Logger } from "./logger";
 import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
-import { ApprovalRegistry, CommandRouter, type ApiLike, type CtxLike } from "./router";
+import { ApprovalRegistry, CommandRouter, type ApiLike, type ApprovalDecision, type CtxLike, type PendingApproval } from "./router";
 import { hashQuestions, QuestionRegistry, type PendingQuestion, type RemoteQuestion } from "./questions";
 import { DingTalkStream, type StreamStatus } from "./stream";
 import { extractText, extractToolNames, safeJson, truncate, truncatePath } from "./util";
@@ -316,6 +319,29 @@ class Bridge {
 		});
 	}
 
+	/** An approval timed out: tell omp the outcome so the turn never hangs. */
+	approvalExpired(approval: PendingApproval, decision: ApprovalDecision): void {
+		const released = decision === "approve";
+		this.log.info(`远程审批 ${approval.id} 超时，按 ${released ? "配置放行" : "安全默认拒绝"} 处理`, { toolName: approval.toolName });
+		try {
+			this.#pi.sendUserMessage(
+				formatApprovalTimeout({
+					id: approval.id,
+					toolName: approval.toolName,
+					released,
+					timeoutMs: this.cfg.approval.timeoutMs,
+				}),
+				{ deliverAs: "followUp" },
+			);
+		} catch (error) {
+			this.log.error("通知 omp 审批超时失败", error);
+		}
+		this.notify(
+			fmtApprovalResolved({ id: approval.id, approved: released, by: "超时" }),
+			{ priority: "normal", bypassQuiet: true },
+		);
+	}
+
 	setQuiet(value: boolean): void {
 		this.quiet = value;
 		try {
@@ -549,6 +575,11 @@ class Bridge {
 // ---------------------------------------------------------------------------
 // Approval matching
 // ---------------------------------------------------------------------------
+
+/** Stable key matching a tool call to its approval — exact arguments required. */
+function approvalKey(toolName: string, input: unknown): string {
+	return `${toolName}\u0000${JSON.stringify(input ?? {})}`;
+}
 
 /** Translate a glob (`*`, `**`, `?`) into an anchored regex. */
 function globToRegExp(glob: string): RegExp {
@@ -893,27 +924,37 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				return undefined;
 			}
 
+			const toolName = String(event?.toolName ?? "?");
+			const detail = describeToolCall(event);
+			const key = approvalKey(toolName, event?.input);
+
+			// The user just approved this exact call in DingTalk — release it once.
+			if (b.approvals.consumeApproved(key)) {
+				b.log.info(`审批已通过，放行 ${toolName}`, { key });
+				return undefined;
+			}
+
 			const rules = b.cfg.approval.rules.length > 0 ? b.cfg.approval.rules : DEFAULT_APPROVAL_RULES;
 			const reason = matchApprovalRules(event, rules);
 			if (!reason) return undefined;
 
-			const toolName = String(event?.toolName ?? "?");
-			const detail = describeToolCall(event);
-			let approvalId = "";
-
-			const decision = await b.approvals.request({
+			// Never await the human: OMP aborts a handler after
+			// `extensionHandlers.toolCallTimeoutMs` (30s) and blocks the call, so a
+			// reply arriving later could no longer release it. Register and block
+			// now; the reply settles the registry and the model re-issues the call.
+			const approval = b.approvals.register({
 				toolName,
 				reason,
 				detail,
+				key,
 				timeoutMs: b.cfg.approval.timeoutMs,
 				onTimeout: b.cfg.approval.onTimeout,
-				onRequested: (approval) => {
-					approvalId = approval.id;
-					b.log.info(`等待远程审批 ${approval.id}`, { toolName, reason });
+				onRequested: (a) => {
+					b.log.info(`等待远程审批 ${a.id}`, { toolName, reason });
 					if (b.cfg.notify.approval) {
 						b.notify(
 							fmtApprovalRequest({
-								id: approval.id,
+								id: a.id,
 								toolName,
 								reason,
 								detail,
@@ -923,16 +964,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						);
 					}
 				},
+				onExpired: (a, decision) => b.approvalExpired(a, decision),
+				duplicate: (a) => b.log.info(`审批去重：复用 ${a.id}，不再重复推送`),
 			});
-
-			if (decision === "approve") return undefined;
-
-			const message =
-				decision === "timeout"
-					? `远程审批超时（编号 ${approvalId}），按安全默认拒绝。需要执行请重新发起或改为人工批准。`
-					: `已被远程用户拒绝（编号 ${approvalId}）。`;
-			b.log.info(`工具调用被拦截: ${message}`, { toolName });
-			return { block: true, reason: message };
+			return {
+				block: true,
+				reason: fmtApprovalBlocked({ id: approval.id, toolName, detail, timeoutMs: b.cfg.approval.timeoutMs }),
+			};
 		}),
 	);
 

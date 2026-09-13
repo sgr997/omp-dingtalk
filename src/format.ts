@@ -197,6 +197,26 @@ export function fmtApprovalResolved(info: { id: string; approved: boolean; by: s
 	};
 }
 
+/** Tells the model a dangerous call was held back and that it must stop and wait. */
+export function fmtApprovalBlocked(info: { id: string; toolName: string; detail: string; timeoutMs: number }): string {
+	return [
+		`工具调用已推送到钉钉等待审批（编号 ${info.id}），用户现在不在本机。`,
+		``,
+		`- 工具：\`${info.toolName}\``,
+		`- 操作：${truncate(info.detail, 300).replace(/\n/g, " ")}`,
+		``,
+		`请**立即结束本轮**，不要重试该调用，也不要假装已获批准。`,
+		`用户会在 ${Math.round(info.timeoutMs / 1000)}s 内回复同意或拒绝；批准后我会通知你重新发起，超时按安全默认拒绝。`,
+	].join("\n");
+}
+
+/** Injected when an approval times out, so the turn never hangs forever. */
+export function formatApprovalTimeout(info: { id: string; toolName: string; released: boolean; timeoutMs: number }): string {
+	return info.released
+		? `（钉钉远程审批 #${info.id} 超时未收到回复（${Math.round(info.timeoutMs / 1000)}s），按配置放行。你可以继续执行。）`
+		: `（钉钉远程审批 #${info.id} 超时未收到回复（${Math.round(info.timeoutMs / 1000)}s），已按安全默认拒绝。不要执行该操作。）`;
+}
+
 type QuestionPack = {
 	id: string;
 	questions: Array<{
@@ -320,6 +340,29 @@ export function formatQuestionInjection(info: {
 		}
 	}
 	return lines.join("\n");
+}
+
+/**
+ * The user message injected when a remote approval is settled. The model never
+ * saw the decision; an approved call is released only when it re-issues it, so
+ * the injection repeats the exact arguments to re-issue.
+ */
+export function formatApprovalInjection(info: {
+	id: string;
+	toolName: string;
+	detail: string;
+	approved: boolean;
+	by: string;
+}): string {
+	if (!info.approved) {
+		return `（钉钉远程审批 #${info.id} 已被 ${info.by} 拒绝。不要执行该操作。）`;
+	}
+	return [
+		`（钉钉远程审批 #${info.id} 已被 ${info.by} 批准，仅一次有效）`,
+		`请原样重新发起该工具调用，参数保持完全一致，否则会被再次拦截：`,
+		`- 工具：\`${info.toolName}\``,
+		`- 参数：${truncate(info.detail, 300).replace(/\n/g, " ")}`,
+	].join("\n");
 }
 
 /** Tells the model an ask it made was forwarded and that it should stop and wait. */

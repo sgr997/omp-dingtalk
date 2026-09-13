@@ -7,7 +7,7 @@
  */
 import type { DingTalkConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
-import { fmtHelp, fmtQuestionAnswerEcho, fmtQuiet, fmtStatus, fmtText, formatQuestionInjection, type Message } from "./format";
+import { fmtHelp, fmtQuestionAnswerEcho, fmtQuiet, fmtStatus, fmtText, formatApprovalInjection, formatQuestionInjection, type Message } from "./format";
 import type { Logger } from "./logger";
 import { QuestionRegistry } from "./questions";
 import { robotMessageText, type RobotMessage } from "./stream";
@@ -24,7 +24,14 @@ export interface PendingApproval {
 }
 
 interface PendingEntry extends PendingApproval {
-	settle: (decision: ApprovalDecision) => void;
+	/** Matches a re-issued call against the approval that released it. */
+	key: string;
+}
+
+/** Drop the internal bookkeeping field before handing an entry to callers. */
+function publicApproval(entry: PendingEntry): PendingApproval {
+	const { key: _key, ...rest } = entry;
+	return rest;
 }
 
 /** Holds in-flight approval requests until a DingTalk reply settles them. */
@@ -32,6 +39,8 @@ export class ApprovalRegistry {
 	#log: Logger;
 	#pending = new Map<string, PendingEntry>();
 	#latest: string | undefined;
+	/** Payload keys the user approved; released once on the next matching call. */
+	#approved = new Set<string>();
 
 	constructor(logger: Logger) {
 		this.#log = logger;
@@ -42,54 +51,65 @@ export class ApprovalRegistry {
 	}
 
 	list(): PendingApproval[] {
-		return [...this.#pending.values()].map(({ settle: _settle, ...rest }) => rest);
+		return [...this.#pending.values()].map((entry) => publicApproval(entry));
 	}
 
 	/**
-	 * Register a request and wait for a decision. Always resolves — a timeout
-	 * falls back to `onTimeout`, and `clear()` (session shutdown) resolves as deny.
+	 * Register a request and return immediately — never await the human here.
+	 *
+	 * OMP aborts a `tool_call` handler after `extensionHandlers.toolCallTimeoutMs`
+	 * (30s by default) and blocks the call, so a reply arriving later can no
+	 * longer release it. Registering and returning `{ block: true }` right away
+	 * keeps the approval window equal to `timeoutMs`; once the user approves,
+	 * the model re-issues the call and `consumeApproved` releases it.
 	 */
-	request(options: {
+	register(options: {
 		toolName: string;
 		reason: string;
 		detail: string;
+		key: string;
 		timeoutMs: number;
 		onTimeout: "deny" | "allow";
 		onRequested?: (approval: PendingApproval) => void;
-	}): Promise<ApprovalDecision> {
+		onExpired?: (approval: PendingApproval, decision: ApprovalDecision) => void;
+		duplicate?: (approval: PendingApproval) => void;
+	}): PendingApproval {
+		const existing = this.#findByKey(options.key);
+		if (existing) {
+			options.duplicate?.(publicApproval(existing));
+			return publicApproval(existing);
+		}
 		const id = this.#uniqueId();
-		let timer: ReturnType<typeof setTimeout> | undefined;
+		const entry: PendingEntry = {
+			id,
+			key: options.key,
+			toolName: options.toolName,
+			reason: options.reason,
+			detail: options.detail,
+			createdAt: Date.now(),
+		};
+		this.#pending.set(id, entry);
+		this.#latest = id;
 
-		return new Promise<ApprovalDecision>((resolve) => {
-			let settled = false;
-			const finish = (decision: ApprovalDecision) => {
-				if (settled) return;
-				settled = true;
-				if (timer) clearTimeout(timer);
-				this.#pending.delete(id);
-				if (this.#latest === id) this.#latest = undefined;
-				resolve(decision);
-			};
+		const timer = setTimeout(() => {
+			if (!this.#pending.delete(id)) return;
+			if (this.#latest === id) this.#latest = undefined;
+			const decision: ApprovalDecision = options.onTimeout === "allow" ? "approve" : "timeout";
+			this.#log.info(`审批 ${id} 超时，按 ${options.onTimeout} 处理`);
+			if (decision === "approve") this.#approved.add(entry.key);
+			options.onExpired?.(publicApproval(entry), decision);
+		}, Math.max(5_000, options.timeoutMs));
+		timer.unref?.();
 
-			const entry: PendingEntry = {
-				id,
-				toolName: options.toolName,
-				reason: options.reason,
-				detail: options.detail,
-				createdAt: Date.now(),
-				settle: finish,
-			};
-			this.#pending.set(id, entry);
-			this.#latest = id;
+		options.onRequested?.(publicApproval(entry));
+		return publicApproval(entry);
+	}
 
-			timer = setTimeout(() => {
-				this.#log.info(`审批 ${id} 超时，按 ${options.onTimeout} 处理`);
-				finish(options.onTimeout === "allow" ? "approve" : "timeout");
-			}, Math.max(5_000, options.timeoutMs));
-			timer.unref?.();
-
-			options.onRequested?.({ id, toolName: entry.toolName, reason: entry.reason, detail: entry.detail, createdAt: entry.createdAt });
-		});
+	/** Release a previously approved call exactly once. */
+	consumeApproved(key: string): boolean {
+		if (!this.#approved.has(key)) return false;
+		this.#approved.delete(key);
+		return true;
 	}
 
 	/** Settle a request by explicit id, or the most recent one when id is omitted. */
@@ -101,19 +121,25 @@ export class ApprovalRegistry {
 			const known = [...this.#pending.keys()];
 			return { ok: false, error: known.length ? `找不到编号 ${id}，当前待审批：${known.join(", ")}` : `找不到编号 ${id}` };
 		}
-		const { settle: _settle, ...approval } = entry;
-		entry.settle(decision);
-		return { ok: true, approval };
+		this.#pending.delete(id);
+		if (this.#latest === id) this.#latest = undefined;
+		if (decision === "approve") this.#approved.add(entry.key);
+		return { ok: true, approval: publicApproval(entry) };
 	}
 
-	/** Resolve everything as denied — used when the session goes away. */
+	/** Drop every pending request — used when the session goes away. */
 	clear(reason: string): void {
 		for (const entry of [...this.#pending.values()]) {
 			this.#log.info(`审批 ${entry.id} 因 ${reason} 自动拒绝`);
-			entry.settle("deny");
 		}
 		this.#pending.clear();
 		this.#latest = undefined;
+		this.#approved.clear();
+	}
+
+	#findByKey(key: string): PendingEntry | undefined {
+		for (const entry of this.#pending.values()) if (entry.key === key) return entry;
+		return undefined;
 	}
 
 	#uniqueId(): string {
@@ -320,12 +346,20 @@ export class CommandRouter {
 			return;
 		}
 		const approval = result.approval!;
+		const by = message.senderNick ?? message.senderStaffId ?? "?";
 		await this.#reply(
 			message,
 			fmtText(
 				approve ? `✅ 已批准 ${approval.id}` : `⛔ 已拒绝 ${approval.id}`,
-				`\`${approval.toolName}\` · 由 ${message.senderNick ?? message.senderStaffId ?? "?"} 处理`,
+				`\`${approval.toolName}\` · 由 ${by} 处理`,
 			),
+		);
+
+		// The model was told to stop and wait; hand it the decision so an
+		// approved call can be re-issued (and released by the registry).
+		this.#deps.pi.sendUserMessage(
+			formatApprovalInjection({ id: approval.id, toolName: approval.toolName, detail: approval.detail, approved: approve, by }),
+			{ deliverAs: "steer" },
 		);
 	}
 
