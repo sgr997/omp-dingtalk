@@ -374,7 +374,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 
 > 表情走钉钉企业应用的 `emotion/reply` 接口，**不过期**（不像 sessionWebhook）——长任务跑几十分钟，结尾的 ✅/❌ 照样打得到。表情接口不可用时自动回落到回复卡片。
 
-终端里还有个本地命令：`/dingtalk status | test | quiet on|off`。
+终端里还有个本地命令：`/dingtalk status | test | quiet on|off`。输入 `/dingtalk `（带空格）或前缀（如 `/dingtalk ta`）会弹出子命令补全，带中文说明。
 
 另外注册了一个 `dingtalk_notify` 工具，模型在任务跑完但你不确定用户还在不在时，可以自己主动推送一条通知。
 
