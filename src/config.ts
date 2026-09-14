@@ -396,15 +396,25 @@ export function loadConfig(cwd: string): LoadedConfig {
 	}
 	// Migration: a single `allowUserId` replaced the old `allowUserIds` array and
 	// `outbound.directUserIds` (the allowlist now doubles as the push recipient).
-	// Read the old keys once, so an existing config does not silently fail closed.
-	if (!config.control.allowUserId) {
+	// Read the old keys once so an existing config does not silently fail closed,
+	// and warn whenever they are still there — a file carrying both is half-migrated.
+	const legacyControl = config.control as unknown as Record<string, unknown>;
+	const legacyOutbound = config.outbound as unknown as Record<string, unknown>;
+	if (legacyControl.allowUserIds !== undefined || legacyOutbound.directUserIds !== undefined) {
 		const pick = (value: unknown): string =>
 			Array.isArray(value) ? String(value.find((v) => typeof v === "string" && v.trim()) ?? "").trim() : "";
-		const legacy = pick((config.control as unknown as Record<string, unknown>).allowUserIds) || pick((config.outbound as unknown as Record<string, unknown>).directUserIds);
-		if (legacy) {
-			config.control.allowUserId = legacy;
-			warnings.push("检测到旧版 control.allowUserIds / outbound.directUserIds，已迁移到 control.allowUserId（只保留第一个人）。请更新配置文件后删除旧字段。");
+		let migrated = "";
+		if (!config.control.allowUserId) {
+			migrated = pick(legacyControl.allowUserIds) || pick(legacyOutbound.directUserIds);
+			if (migrated) config.control.allowUserId = migrated;
 		}
+		warnings.push(
+			migrated
+				? "旧版 control.allowUserIds / outbound.directUserIds 已迁移到 control.allowUserId（取第一个值）。请删掉旧字段。"
+				: config.control.allowUserId
+					? "配置里还留着旧版 control.allowUserIds / outbound.directUserIds，已被忽略；现在生效的是 control.allowUserId。请删掉旧字段。"
+					: "检测到旧版 control.allowUserIds / outbound.directUserIds，但里面没有可用的 ID；请把 /id 返回的 senderStaffId 填进 control.allowUserId。",
+		);
 	}
 	config.control.allowUserId = typeof config.control.allowUserId === "string" ? config.control.allowUserId.trim() : "";
 	config.notify.onlyWhenTakenOver = config.notify.onlyWhenTakenOver === true;

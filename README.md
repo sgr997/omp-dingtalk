@@ -210,6 +210,20 @@ cp config.example.json ~/.omp/dingtalk.json
 把返回的 `senderStaffId` 填进 `control.allowUserId`。**留空 = 拒绝所有指令**（fail-closed：白名单为空时除 `/id` 外一律拒绝，陌生人触达机器人也控制不了 omp）。`/id` 只回显你自己的 ID，不带任何会话信息，所以白名单没配好之前也能用。
 （这个 ID 同时就是推送收件人，一份配置两用。）
 
+### 升级到单值白名单（旧版 → 新版）
+
+旧版配置里有两个字段：`control.allowUserIds`（数组，指令白名单）和 `outbound.directUserIds`（数组，推送收件人）+ `outbound.learnFromInbound`。新版把两者合并成**一个字符串** `control.allowUserId`：填进去的这个人既能下指令，也是唯一收到单聊推送的人，不再需要第二份名单。
+
+读到旧字段就照下面改：
+
+- `control.allowUserIds: ["a", "b"]` → `control.allowUserId: "a"`（只保留第一个），删掉原键
+- `outbound.directUserIds: [...]` → 删掉；若 `control.allowUserId` 为空，取这里的第一个值填进去
+- `outbound.learnFromInbound` → 删掉（学习收件人的功能已移除）
+- `outbound.mode` 保持不变
+- 环境变量 `DINGTALK_ALLOW_USER_IDS`（逗号分隔）→ `DINGTALK_ALLOW_USER_ID`（单值）
+
+`bun run doctor` 会提示旧字段残留。代码对旧文件有兜底：读不到 `control.allowUserId` 时会回退读旧键的第一个值并打告警，所以漏改不会让机器人变成「谁都不理」，但配置里留着旧键会一直告警。
+
 ---
 
 ## 5. 两种用法

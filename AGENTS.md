@@ -116,6 +116,20 @@ cp config.example.json ~/.omp/dingtalk.json
 - 只想发群不要私聊 → `outbound.mode` 改 `webhook`，填 `webhook.url`/`webhook.secret`，`stream` 可不配。
 - 想要会话一启动就自动接管（长任务里的提问能手机答）→ `autoTakeover: true`。
 
+### 4.1 遇到旧配置就直接迁移
+
+旧版有两个字段：`control.allowUserIds`（数组，指令白名单）和 `outbound.directUserIds`（数组，推送收件人）+ `outbound.learnFromInbound`。新版合并成**一个字符串** `control.allowUserId`——填的这一个人既能下指令，也是唯一收到单聊推送的人。用户配置里见到旧字段就按表改（写配置属于你可以直接做的事）：
+
+| 旧字段 | 处理 |
+| --- | --- |
+| `control.allowUserIds: ["a", "b"]` | 取第一个，写成 `control.allowUserId: "a"`，删掉原键 |
+| `outbound.directUserIds: [...]` | 删掉。`control.allowUserId` 为空时取这里的第一个值填进去（收件人就是这个字段） |
+| `outbound.learnFromInbound` | 删掉，功能已移除 |
+
+`outbound.mode` 保持不变。环境变量 `DINGTALK_ALLOW_USER_IDS`（逗号分隔）改成 `DINGTALK_ALLOW_USER_ID`（单值）。
+
+代码对旧文件有兜底：读不到 `control.allowUserId` 时回退读旧键的第一个值并打告警，所以漏改不会让机器人变成「谁都不理」；但旧键留着会一直告警，要清掉。`bun run doctor` 也会提示。
+
 ---
 
 ## 5. 验证（配置自检，不需要模型凭据）
