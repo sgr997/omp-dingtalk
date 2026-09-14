@@ -160,8 +160,6 @@ extensions:
 编辑源码后新会话会自动重载（加载器带 mtime 缓存失效）。
 </details>
 
-卸载：`omp plugin uninstall omp-dingtalk`（只清注册）。⚠️ 按安装方式补一步：**link/软链安装**（`omp plugin link`）卸载后 `~/.omp/plugins/node_modules/omp-dingtalk` 的软链会残留，要彻底干净再 `rm ~/.omp/plugins/node_modules/omp-dingtalk`（只删软链，源码目录不动）；npm 安装卸载的是真实包目录，无此残留。重装：`omp plugin link <仓库绝对路径>`，随后 `omp plugin doctor` 应全绿、`omp plugin list` 能看到 `omp-dingtalk@0.1.0`。
-
 ---
 
 ## 4. 配置
@@ -494,35 +492,9 @@ bun run lint        # oxlint（0 警告）
 
 ## 10. 分发到其他电脑
 
-**可以直接拷，也可以一键装。** 插件是零运行时依赖的——没有 `node_modules`，不需要 `npm install`，代码里也没有硬编码路径或平台特定逻辑（Windows / macOS / Linux 都能跑）。
+**把目录拷过去，或从源码装。** 插件是零运行时依赖的——没有 `node_modules`，不需要 `npm install`，代码里也没有硬编码路径或平台特定逻辑（Windows / macOS / Linux 都能跑）。
 
-### 方式 A：一键安装（推荐）
-
-```bash
-curl -fsSL https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/install.sh | bash
-```
-
-或用 `wget`：
-
-```bash
-wget -qO- https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/install.sh | bash
-```
-
-它会自动：
-1. 下载最新 Release 的 `omp-dingtalk-0.1.0.tar.gz`
-2. 解压到 `~/.local/share/omp-dingtalk`
-3. 执行 `omp plugin link`
-4. 如果 `~/.omp/dingtalk.json` 不存在，从样例复制一份（`chmod 600`，因为要放密钥）并提示你编辑；**已存在的配置不会覆盖**。样例里的 `webhook.url` 和 stream 凭据都是空的，开箱状态就是「未配置」
-
-> ⚠️ `install.sh` 面向全新安装，会先 `rm -rf` 目标目录。**别在源码工作副本上跑它**——默认目标 `~/.local/share/omp-dingtalk` 恰好就是源码目录时，它会把整份代码删掉。源码副本请用 `omp plugin link` 或 `git pull` 更新。脚本检测到目标目录是 git 工作副本时会直接拒绝执行。
-
-装完跑验证：
-
-```bash
-cd ~/.local/share/omp-dingtalk && bun run doctor
-```
-
-### 方式 B：手动拷
+### 手动安装
 
 1. 下载 Release 资产：
    ```bash
