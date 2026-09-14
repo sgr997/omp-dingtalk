@@ -42,7 +42,7 @@
 
 **安全默认（agent 直接按这个引导，不要问）：**
 - `control.scope: "direct"` —— 只认单聊，群聊一律不理（防误触）。
-- `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通。
+- `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通；已接管的会话不会因新会话启动而松开（接管是显式状态，只有被别的会话抢占或 `/dingtalk release` 才解除）。
 - `control.allowUserId` 必填，只填一个人 —— 他既是白名单（**留空 = 拒绝一切指令，fail-closed**），也是单聊推送的唯一收件人。引导用户用 `/id` 拿到 ID 后填入。
 - 通知走私聊优先 `direct`（不打扰群），但要有企业内部应用。
 

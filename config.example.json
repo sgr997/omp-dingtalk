@@ -74,7 +74,7 @@
     "scope": "direct",
     "$comment_scope": "direct = 只认单聊，群里 @ 机器人也一律不理（推荐）。group = 只认群聊。all = 两者都认。",
     "autoTakeover": false,
-    "$comment_autoTakeover": "false（推荐）= 每个新会话都要在 omp 里敲 /dingtalk takeover 才接通入站通道。true = 会话一启动就自动接管。",
+    "$comment_autoTakeover": "false（推荐）= 会话启动不自动接通入站通道，要手动 /dingtalk takeover；已接管的会话不会因新会话启动而松开。true = 会话一启动就自动接管。",
     "requireAt": true,
     "$comment_requireAt": "群聊里只有 @ 机器人时才响应，避免群里闲聊误触发。scope 为 direct 时无影响。",
     "allowUserId": "",

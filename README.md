@@ -471,7 +471,7 @@ bun run lint        # oxlint（0 警告）
 | 通知还是发到群里 | `outbound.mode` 是不是 `webhook` 或 `both`。自定义机器人**只能发群**，要私聊必须用 `direct` |
 | 群里 @机器人 没反应 | 默认就是这样：`control.scope = "direct"` 时群聊消息一律忽略。要用群聊得显式改成 `group` / `all` |
 | 钉钉里发消息没反应 | ① `stream.enabled` 是否为 true ② 是否已在 omp 里 `/dingtalk takeover` ③ 是否 @ 了机器人（群聊）④ 另开终端跑 `bun run watch`，再发一条看有没有帧 ⑤ 应用是否**已发布** |
-| 每个新会话都要重新 takeover | 这是设计如此（`control.autoTakeover: false`）。确实想自动接管再改成 `true` |
+| 新会话里钉钉还能指挥，是不是串了 | 不是。接管是显式状态且跨会话保留：`/dingtalk takeover` 之后新会话启动**不会**松开它。`control.autoTakeover: false` 只表示新会话不**自动**接管。要断开就用 `/dingtalk release`，想会话一启动自动接管就改成 `true` |
 | 收到「⚠️ 钉钉接管已被抢占」 | 有另一个会话在同一个钉钉应用上执行了 `/dingtalk takeover`。本会话已自动释放、Stream 已关闭。想抢回来就在本会话再敲一次 `/dingtalk takeover`（会再抢一次）。如果不想被抢，给每个会话配**不同的** `stream.clientId` |
 | `/dingtalk status` 显示「接管锁被其他会话占用」 | 说明那个会话还活着并持有锁。要么去那个会话 `release`，要么在本会话 `takeover` 直接抢。显示 PID 和目录，可以据此找到它 |
 | 崩溃后 takeover 说被占用 | 不该发生：锁里 PID 已死会立即回收，心跳超时 30 秒也会回收。若确实卡住，检查 `/dingtalk status` 里的锁文件路径，确认没有**同 PID 被复用**的进程 |
