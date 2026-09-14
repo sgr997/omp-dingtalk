@@ -97,6 +97,18 @@ if (ours) {
 	}
 	check("注册了 dingtalk_notify 工具", ours.tools.has("dingtalk_notify"), [...ours.tools.keys()]);
 	check("注册了 /dingtalk 命令", ours.commands.has("dingtalk"), [...ours.commands.keys()]);
+	// The dual-surface ask relies on re-registering the native tool by name: the
+	// host replaces its registry entry and then hands the re-registration an
+	// `ctx.invokeTool` that reaches the *unwrapped* native `ask`. If this
+	// assertion ever fails, the plugin silently loses the ability to show the
+	// dialog and ask DingTalk at the same time.
+	check("重注册了原生 ask 工具（双端提问）", ours.tools.has("ask"), [...ours.tools.keys()]);
+	const askTool = ours.tools.get("ask") as any;
+	check(
+		"重注册的 ask 保留了独占执行属性",
+		(askTool?.concurrency ?? askTool?.definition?.concurrency) === "exclusive",
+		{ top: askTool?.concurrency, def: askTool?.definition?.concurrency, keys: askTool ? Object.keys(askTool) : null },
+	);
 	check("每个事件都只有一个 handler", handlerNames.every((name) => ours.handlers.get(name)!.length === 1));
 }
 

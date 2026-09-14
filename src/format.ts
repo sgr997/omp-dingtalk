@@ -317,6 +317,27 @@ export function fmtQuestionTimeout(info: { id: string; questions: QuestionPack["
 }
 
 /**
+ * The question was pushed to DingTalk and shown in the TUI at the same time,
+ * and the person at the terminal answered first. Sent so a reply typed on the
+ * phone afterwards does not look like it was silently dropped.
+ */
+export function fmtQuestionAnsweredLocally(info: { id: string; questions: QuestionPack["questions"] }): Message {
+	return {
+		title: `💻 已在本地回答 ${info.id}`,
+		text: [
+			`**提问已在 omp 终端里作答，钉钉这边已作废**`,
+			``,
+			`- **编号**: \`${info.id}\``,
+			...(sessionTag ? [originLine()] : []),
+			``,
+			...info.questions.flatMap((q, qi) => [`${qi + 1}. ${truncate(q.question, 300)}`]),
+			``,
+			`这条提问无需再回复。`,
+		].join("\n"),
+	};
+}
+
+/**
  * The user message injected into the session when a remote question is
  * answered — the model never saw the original `ask` dialog, so the answer has
  * to carry the question text with it.
@@ -363,25 +384,6 @@ export function formatApprovalInjection(info: {
 		`- 工具：\`${info.toolName}\``,
 		`- 参数：${truncate(info.detail, 300).replace(/\n/g, " ")}`,
 	].join("\n");
-}
-
-/** Tells the model an ask it made was forwarded and that it should stop and wait. */
-export function fmtQuestionBlocked(info: { id: string; questions: QuestionPack["questions"]; timeoutMs: number }): string {
-	const lines = [
-		`提问已推送到钉钉（编号 ${info.id}），用户现在不在本机，正在手机上回答。`,
-		``,
-	];
-	info.questions.forEach((q, qi) => {
-		lines.push(
-			`${qi + 1}. ${q.question}${q.multi ? "（多选）" : ""}${q.recommended !== undefined ? `（推荐第 ${q.recommended + 1} 项）` : ""}`,
-		);
-	});
-	lines.push(
-		``,
-		`请**立即结束本轮**，不要假装用户已作答，不要再次调用提问工具。`,
-		`用户的回答会在 ${Math.round((info.timeoutMs ?? 600_000) / 1000)}s 内以一条新的用户消息发来；超时未收到会让你自行决定。`,
-	);
-	return lines.join("\n");
 }
 
 export function fmtError(info: { kind: string; detail: string; hint?: string }): Message {

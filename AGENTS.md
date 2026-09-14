@@ -117,6 +117,7 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 - 只想发群不要私聊 → `outbound.mode` 改 `webhook`，填 `webhook.url`/`webhook.secret`，`stream` 可不配。
 - 想要会话一启动就自动接管（长任务里的提问能手机答）→ `autoTakeover: true`。
+- **双端提问**（`question.enabled`，默认开）：模型调用 `ask` 时，终端原生选择框和钉钉推送**同时**出现，任一端作答都算，另一端自动关闭/作废。为此插件**重注册了同名的 `ask` 工具**——所以 `pi.getAllTools()` 里 `ask` 的来源是扩展而非内置，这是预期行为，不是配置损坏。宿主不给同名 `ctx.invokeTool` 时（headless 会话、子代理）插件自动退回原生行为，不会报错。
 
 ### 4.1 遇到旧配置就直接迁移
 

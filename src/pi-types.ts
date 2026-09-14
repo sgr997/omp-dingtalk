@@ -38,6 +38,15 @@ export interface ExtensionToolDefinition {
 	label?: string;
 	description: string;
 	parameters?: any;
+	/** `"essential"` keeps the tool top-level; `"discoverable"` is the default. */
+	loadMode?: string;
+	/**
+	 * Not a documented `ToolDefinition` field, but the host proxies every own
+	 * property of the definition onto its tool adapter, so declaring it here is
+	 * how a re-registered built-in keeps the native scheduling contract (see
+	 * `ask-tool.ts`, which mirrors the native `ask` tool's `"exclusive"`).
+	 */
+	concurrency?: string;
 	execute: (...args: any[]) => unknown;
 }
 

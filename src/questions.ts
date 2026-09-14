@@ -56,11 +56,23 @@ export interface QuestionAnswerPayload {
 export interface QuestionAnswerResult {
 	ok: true;
 	answer: QuestionAnswerPayload;
+	/**
+	 * True when a dual-surface racer is waiting on this entry. The answer then
+	 * reaches the model as the `ask` tool's own result, so the router must NOT
+	 * also inject it as a user message — that would double-answer the model.
+	 */
+	raced: boolean;
 }
 
 interface PendingEntry extends PendingQuestion {
 	settle: (answer: QuestionAnswerPayload) => void;
 	onTimeout: (question: PendingQuestion) => void;
+	/**
+	 * Notified on every settlement — an answer, a timeout, or a {@link
+	 * QuestionRegistry.drop}. The dual-surface racer hangs on this to learn that
+	 * the DingTalk side is over; an empty `items` means nobody answered.
+	 */
+	onSettled?: (answer: QuestionAnswerPayload) => void;
 }
 
 /**
@@ -189,6 +201,50 @@ function normalizeLabel(label: string): string {
 	return label.replace(/\s+/g, "").toLowerCase();
 }
 
+/**
+ * Coerce an `ask` tool call's raw input into a question list.
+ *
+ * The input is untrusted (partially streamed or model-mangled), so anything
+ * that does not look like a usable question is rejected and left to OMP's own
+ * validation. Questions with no options are kept — the answer is then free text.
+ */
+export function extractAskQuestions(input: unknown): RemoteQuestion[] | undefined {
+	const questions = (input as { questions?: unknown } | undefined)?.questions;
+	if (!Array.isArray(questions) || questions.length === 0) return undefined;
+
+	const out: RemoteQuestion[] = [];
+	for (const raw of questions) {
+		if (!raw || typeof raw !== "object") return undefined;
+		const q = raw as Record<string, any>;
+		const question = typeof q.question === "string" ? q.question.trim() : "";
+		if (!question) return undefined;
+
+		const options: RemoteQuestion["options"] = [];
+		if (q.options !== undefined) {
+			if (!Array.isArray(q.options)) return undefined;
+			for (const option of q.options) {
+				if (!option || typeof option !== "object" || typeof option.label !== "string") return undefined;
+				options.push({
+					label: option.label,
+					...(typeof option.description === "string" && option.description.trim()
+						? { description: option.description.trim() }
+						: {}),
+				});
+			}
+		}
+
+		out.push({
+			id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${out.length + 1}`,
+			question,
+			...(typeof q.header === "string" && q.header.trim() ? { header: q.header.trim() } : {}),
+			options,
+			multi: q.multi === true,
+			...(typeof q.recommended === "number" && q.recommended >= 0 ? { recommended: q.recommended } : {}),
+		});
+	}
+	return out;
+}
+
 /** Stable identity of a question set, used to not push the same ask twice. */
 export function hashQuestions(questions: RemoteQuestion[]): string {
 	const flat = questions.map((q) => ({
@@ -214,12 +270,20 @@ export class QuestionRegistry {
 	}
 
 	list(): PendingQuestion[] {
-		return [...this.#pending.values()].map(({ settle: _s, onTimeout: _t, ...rest }) => rest);
+		return [...this.#pending.values()].map(
+			({ settle: _settle, onTimeout: _onTimeout, onSettled: _onSettled, ...rest }) => rest,
+		);
 	}
 
 	/**
 	 * Register a question set and arm its timeout. Always resolves — on timeout
 	 * `onTimeout` runs (the agent is told to move on, never left blocked).
+	 *
+	 * `onSettled` fires for every outcome, including a drop. It is deliberately
+	 * NOT attached when an identical question set is deduped onto a live entry:
+	 * that entry already has a racer, and two local dialogs answering one
+	 * registry row is not a state worth supporting (the native `ask` tool is
+	 * `concurrency: "exclusive"`, so it cannot happen in practice).
 	 */
 	register(options: {
 		questions: RemoteQuestion[];
@@ -228,6 +292,7 @@ export class QuestionRegistry {
 		onTimeout: (question: PendingQuestion) => void;
 		onRegistered?: (question: PendingQuestion) => void;
 		duplicate?: (existing: PendingQuestion) => void;
+		onSettled?: (answer: QuestionAnswerPayload) => void;
 	}): PendingQuestion {
 		// Same question asked again while still pending: reuse the existing entry.
 		for (const entry of this.#pending.values()) {
@@ -249,12 +314,14 @@ export class QuestionRegistry {
 
 		const entry: PendingEntry = {
 			...question,
-			settle: (_answer) => {
+			settle: (answer) => {
 				if (timer) clearTimeout(timer);
 				this.#pending.delete(id);
 				if (this.#latest === id) this.#latest = undefined;
+				options.onSettled?.(answer);
 			},
 			onTimeout: options.onTimeout,
+			onSettled: options.onSettled,
 		};
 		this.#pending.set(id, entry);
 		this.#latest = id;
@@ -301,8 +368,24 @@ export class QuestionRegistry {
 		if (!parsed.ok) return parsed;
 
 		const answer: QuestionAnswerPayload = { id, items: parsed.items, answeredBy, raw };
+		// Read the racer flag before settling: `settle` deletes the entry.
+		const raced = entry.onSettled !== undefined;
 		entry.settle(answer);
-		return { ok: true, answer };
+		return { ok: true, answer, raced };
+	}
+
+	/**
+	 * Settle a pending question with no answer, without the timeout path — the
+	 * DingTalk copy is retracted because the local TUI dialog already answered
+	 * (or was cancelled). Returns false when the entry is already gone, which
+	 * means the racer lost a genuine race and must not report a retraction.
+	 */
+	drop(id: string, reason: string): boolean {
+		const entry = this.#pending.get(id);
+		if (!entry) return false;
+		this.#log.info(`远程提问 ${id} 撤销：${reason}`);
+		entry.settle({ id, items: [], answeredBy: "", raw: "" });
+		return true;
 	}
 
 	/** Drop everything — used when the session goes away or takeover is released. */
