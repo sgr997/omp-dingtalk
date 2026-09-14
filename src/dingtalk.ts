@@ -59,9 +59,6 @@ const HTTP_TIMEOUT_MS = 10_000;
 const THROTTLE_COOLDOWN_MS = 10 * 60_000;
 /** Enterprise-app robot 1:1 push. */
 const OTO_MESSAGE_URL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
-/** Cap on recipients learned from inbound messages, so the list cannot grow forever. */
-const MAX_LEARNED_RECIPIENTS = 20;
-
 const RANK: Record<NonNullable<SendOptions["priority"]>, number> = { high: 0, normal: 1, low: 2 };
 
 export class DingTalkSender {
@@ -79,9 +76,6 @@ export class DingTalkSender {
 
 	#accessToken = "";
 	#accessTokenExpiresAt = 0;
-
-	/** 1:1 recipients discovered from inbound messages (see `rememberUser`). */
-	#learnedUserIds: string[] = [];
 
 	constructor(cfg: DingTalkConfig, logger: Logger) {
 		this.#cfg = cfg;
@@ -129,31 +123,14 @@ export class DingTalkSender {
 		return this.#recipients().length;
 	}
 
-	/** 1:1 recipients: the configured ones, plus anyone learned from inbound. */
-	#recipients(): string[] {
-		const out: string[] = [];
-		for (const id of [...this.#cfg.outbound.directUserIds, ...this.#learnedUserIds]) {
-			if (id && !out.includes(id)) out.push(id);
-		}
-		return out;
-	}
-
 	/**
-	 * Remember a user who talked to the robot, so a `direct` push has somewhere
-	 * to go without hand-copying the id out of `/id` into the config.
-	 *
-	 * The caller must only pass senders that already cleared the command
-	 * allowlist — otherwise a stranger who happens to DM the robot could
-	 * subscribe themselves to this session's notifications.
+	 * 1:1 push recipients. The allowlisted operator is the recipient: whoever
+	 * can command the session can receive its notifications, so there is exactly
+	 * one id to configure.
 	 */
-	rememberUser(userId: string): boolean {
-		const id = String(userId ?? "").trim();
-		if (!id || !this.#cfg.outbound.learnFromInbound) return false;
-		if (this.#cfg.outbound.directUserIds.includes(id) || this.#learnedUserIds.includes(id)) return false;
-		this.#learnedUserIds.push(id);
-		if (this.#learnedUserIds.length > MAX_LEARNED_RECIPIENTS) this.#learnedUserIds.shift();
-		this.#log.info(`已记住单聊推送收件人 ${id}`);
-		return true;
+	#recipients(): string[] {
+		const id = this.#cfg.control.allowUserId;
+		return id ? [id] : [];
 	}
 
 	get stats() {
@@ -385,7 +362,7 @@ export class DingTalkSender {
 		const recipients = this.#recipients();
 		if (!robotCode) return { ok: false, errmsg: "单聊推送需要 stream.robotCode" };
 		if (recipients.length === 0) {
-			return { ok: false, errmsg: "单聊推送没有收件人（outbound.directUserIds 为空）" };
+			return { ok: false, errmsg: "单聊推送没有收件人（control.allowUserId 为空）" };
 		}
 
 		try {

@@ -51,12 +51,12 @@
 
 ```json
 {
-  "outbound": { "mode": "direct", "directUserIds": ["你的钉钉userId"], "learnFromInbound": true }
+  "outbound": { "mode": "direct" }
 }
 ```
 
-- 收件人填**钉钉 userId**，也就是入站消息里的 `senderStaffId` —— 给机器人发 `/whoami` 就能拿到（`/id` 是别名）。
-- 懒得抄就留空 `directUserIds`，靠 `learnFromInbound`：**白名单里的人**给机器人发过消息后自动成为收件人（只认 `control.allowUserIds` 里的人，陌生人 DM 机器人不会把自己加进来）。
+- 收件人不用单独配：`control.allowUserId` 里那一个人**既是唯一能下指令的人，也是唯一收到推送的人**。填的值就是 `senderStaffId` —— 给机器人发 `/whoami` 就能拿到（`/id` 是别名）。
+- 也就是说白名单为空时单聊通道同样没有收件人：先在单聊发一次 `/whoami`，把返回的 ID 填进 `control.allowUserId` 即可。
 - 应用侧还需要**机器人发送消息**权限，且收件人在应用的可见范围内；不满足会返回 403，`bun run doctor` 会把这条列出来。
 - 走 `direct` 时**不受**自定义机器人 20 条/分钟的限制。
 
@@ -144,7 +144,7 @@ bun run watch 60000    # 抓 60 秒
 
 > 钉钉**不一定会推 `REGISTERED` 帧**。连上却没有收到它，不代表配置有问题——只有真收到消息帧才算通。`bun run doctor` 已经把「能连上」判定为通过。
 
-全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/whoami`，把返回的 `senderStaffId` 填进 `control.allowUserIds`。
+全绿之后就照它结尾的提示做：群里 `@机器人` 发 `/whoami`，把返回的 `senderStaffId` 填进 `control.allowUserId`。
 
 
 <details>
@@ -178,14 +178,14 @@ cp config.example.json ~/.omp/dingtalk.json
 - 调限流：`OMP_DINGTALK_MIN_GAP_MS`（默认 2200）、`OMP_DINGTALK_MAX_PER_MIN`（默认 20）。
 - 调接管：`OMP_DINGTALK_HEARTBEAT_MS`（心跳周期，默认 5000，决定被抢占后多久让位）、`OMP_DINGTALK_LOCK_DIR`（锁文件目录，默认 `~/.omp/agent`）。
 - 改完配置**开新会话**即生效，不用重启 omp。
-- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_IDS`（逗号分隔）、`DINGTALK_APPROVAL_MODE`、`DINGTALK_QUESTION_ENABLED`、`DINGTALK_QUESTION_TIMEOUT_MS`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`、`DINGTALK_DIRECT_USER_IDS`（逗号分隔）。
+- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_ID`、`DINGTALK_APPROVAL_MODE`、`DINGTALK_QUESTION_ENABLED`、`DINGTALK_QUESTION_TIMEOUT_MS`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`。
 - 只给某个项目配（比如公司项目）：放到 `<项目>/.omp/dingtalk.json`，只覆盖要改的字段。
 
 ### 只认单聊 + 显式接管（推荐的保守配置）
 
 ```json
 {
-  "outbound": { "mode": "direct", "directUserIds": ["你的userId"] },
+  "outbound": { "mode": "direct" },
   "control": { "scope": "direct", "autoTakeover": false },
   "notify": { "onlyWhenTakenOver": true }
 }
@@ -205,10 +205,10 @@ cp config.example.json ~/.omp/dingtalk.json
 
 > 在**单聊**里给机器人发 `/whoami`（`/id`、`我是谁` 也一样）
 
-这条指令**在配白名单之前就能用**——首次接入时你还没进 `allowUserIds`，机器人也会回复你的身份卡。
+这条指令**在配白名单之前就能用**——首次接入时你还没进 `allowUserId`，机器人也会回复你的身份卡。
 
-把返回的 `senderStaffId` 填进 `control.allowUserIds`。**留空 = 拒绝所有指令**（fail-closed：白名单为空时除 `/id` 外一律拒绝，陌生人触达机器人也控制不了 omp）。`/id` 只回显你自己的 ID，不带任何会话信息，所以白名单没配好之前也能用。
-（这个 ID 同时也是 `outbound.directUserIds` 要填的值。）
+把返回的 `senderStaffId` 填进 `control.allowUserId`。**留空 = 拒绝所有指令**（fail-closed：白名单为空时除 `/id` 外一律拒绝，陌生人触达机器人也控制不了 omp）。`/id` 只回显你自己的 ID，不带任何会话信息，所以白名单没配好之前也能用。
+（这个 ID 同时就是推送收件人，一份配置两用。）
 
 ---
 
@@ -226,7 +226,7 @@ omp --approval-mode=yolo
 
 ```json
 {
-  "outbound": { "mode": "direct", "directUserIds": ["你的userId"] },
+  "outbound": { "mode": "direct" },
   "approval": { "mode": "remote", "timeoutMs": 300000, "onTimeout": "deny" },
   "notify": { "sessionStop": true, "approval": true }
 }
@@ -418,7 +418,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 - **绝不拖垮会话**：OMP 扩展与宿主同进程，未捕获的异常会杀掉整个会话。所有事件处理器、定时器、WebSocket 回调都做了包裹。
 - **先 ACK 再处理**：Stream 服务端约 60 秒重投未应答的消息，而远程审批可能要等好几分钟。所以入站帧先回 ACK，再用 `messageId` 去重兜住重投。
 - **重载配置不重建发送器**：`refreshConfig()` 用 `updateConfig()` 原地换配置。重建实例会重置限流窗口（可能撞上钉钉 20 条/分钟被封 10 分钟），而且老实例并行排空积压会让通知乱序。
-- **收件人只从白名单里学**：`learnFromInbound` 只在发送者通过 `control.allowUserIds` 之后才记录，否则陌生人 DM 一下机器人就能订阅到你的会话通知。
+- **收件人就是白名单里那个人**：没有单独的收件人列表，能命令会话的人才收得到推送。反过来若做成「谁发消息谁订阅」，陌生人 DM 一下机器人就能订阅到你的会话通知。
 - **单聊锁定是默认值**：`control.scope` 默认 `direct`，非法值会告警并回退到 `direct` —— 拼错不会把控制面意外放大。同理 `autoTakeover` 默认 `false`。
 - **接管是抢占式的，靠锁兜底**：`takenOver` 只是进程内的布尔值，管不住别的会话。跨会话靠 `src/lock.ts` 的锁文件（按 `clientId` 分片、PID + 心跳双重存活判定、token 防止误删）。语义上**后来者赢**：这正是用户敲 `/dingtalk takeover` 时想表达的意思；旧持有者在一个心跳周期内自己让位，所以两个连接不会长期并存。
 - **通知带会话标识**：每条通知的落款是 `omp · <目录名>·<4位短码> · HH:MM:SS`，审批这类没有落款的消息会多一行 `来自`。多个会话（或多台机器）共用一个钉钉账号时才分得清是谁在说话。
@@ -441,7 +441,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 191 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、收件人学习与白名单隔离、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
+- `test/smoke.ts` — 191 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -453,7 +453,7 @@ bun run lint        # oxlint（0 警告）
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
 | 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
 | 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
-| 设了 `direct` 但单聊收不到通知 | ① `stream.robotCode` 是否填了（`ding` 开头）② `outbound.directUserIds` 是否为空、或还没人在白名单里发过消息 ③ 应用是否有**机器人发送消息**权限、收件人是否在应用可见范围内 ④ `/dingtalk status` 看「出站通道」和「单聊收件人」两行 |
+| 设了 `direct` 但单聊收不到通知 | ① `stream.robotCode` 是否填了（`ding` 开头）② `control.allowUserId` 是否为空（它同时是白名单和推送收件人） ③ 应用是否有**机器人发送消息**权限、收件人是否在应用可见范围内 ④ `/dingtalk status` 看「出站通道」和「单聊收件人」两行 |
 | 通知还是发到群里 | `outbound.mode` 是不是 `webhook` 或 `both`。自定义机器人**只能发群**，要私聊必须用 `direct` |
 | 群里 @机器人 没反应 | 默认就是这样：`control.scope = "direct"` 时群聊消息一律忽略。要用群聊得显式改成 `group` / `all` |
 | 钉钉里发消息没反应 | ① `stream.enabled` 是否为 true ② 是否已在 omp 里 `/dingtalk takeover` ③ 是否 @ 了机器人（群聊）④ 另开终端跑 `bun run watch`，再发一条看有没有帧 ⑤ 应用是否**已发布** |
@@ -540,4 +540,4 @@ cd ~/.local/share/omp-dingtalk && bun run doctor
 | 每台机器都要能远程控制 | 每台建**自己的**企业内部应用（各自的 ClientID/Secret），机器人各自加群 |
 | 只有一台需要被远程控制 | 只在那台配 `stream`，其他机器设 `stream.enabled: false` 纯做通知 |
 
-`control.allowUserIds` 填的是你本人的 `senderStaffId`，同一个人在多台机器上可以复用同一个值。
+`control.allowUserId` 填的是你本人的 `senderStaffId`，同一个人在多台机器上可以复用同一个值。

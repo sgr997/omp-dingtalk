@@ -35,15 +35,15 @@
 | 用户想要的 | 推荐方案 | 你要让用户准备的 | 配置要点 |
 | --- | --- | --- | --- |
 | 只收通知，发**群里** | webhook | 群自定义机器人 Webhook URL | `outbound.mode: webhook`（默认） |
-| 只收通知，发**私聊** | direct | 企业内部应用 ClientID/Secret + robotCode | `outbound.mode: direct` + `directUserIds` |
+| 只收通知，发**私聊** | direct | 企业内部应用 ClientID/Secret + robotCode | `outbound.mode: direct`（收件人 = `control.allowUserId`） |
 | 也要**远程控制** | direct + Stream | 企业内部应用 ClientID/Secret + robotCode | `outbound.mode: direct` + `stream` 全填 + `autoTakeover` |
 
-**私聊收件人的 userId** 不用一开始就抄——配置完能跑后，让用户在单聊给机器人发 `/whoami`，返回值就是 userId，再填进 `allowUserIds` 和 `directUserIds`。这是最不容易抄错的路。
+**私聊收件人的 userId** 不用一开始就抄——配置完能跑后，让用户在单聊给机器人发 `/whoami`，返回值就是 userId，再填进 `control.allowUserId`。这是最不容易抄错的路。
 
 **安全默认（agent 直接按这个引导，不要问）：**
 - `control.scope: "direct"` —— 只认单聊，群聊一律不理（防误触）。
 - `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通。
-- `control.allowUserIds` 必填 —— 白名单，**留空 = 拒绝一切指令（fail-closed）**，引导用户用 `/id` 拿到 ID 后填入。
+- `control.allowUserId` 必填，只填一个人 —— 他既是白名单（**留空 = 拒绝一切指令，fail-closed**），也是单聊推送的唯一收件人。引导用户用 `/id` 拿到 ID 后填入。
 - 通知走私聊优先 `direct`（不打扰群），但要有企业内部应用。
 
 ---
@@ -92,7 +92,7 @@ cp config.example.json ~/.omp/dingtalk.json
 
 配置查找顺序（后者覆盖前者）：内置默认 → `~/.omp/agent/dingtalk.json` → `~/.omp/dingtalk.json` → `<项目>/.omp/dingtalk.json` → 环境变量。改完**开新会话生效**，不用重启。
 
-凭据不想落盘用环境变量（README.md 第 4 节有完整清单），常见几个：`DINGTALK_WEBHOOK_URL`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_IDS`、`DINGTALK_AUTO_TAKEOVER`。
+凭据不想落盘用环境变量（README.md 第 4 节有完整清单），常见几个：`DINGTALK_WEBHOOK_URL`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_ID`、`DINGTALK_AUTO_TAKEOVER`。
 
 **只给某个项目配**：放 `<项目>/.omp/dingtalk.json`，只覆盖要改的字段。
 
@@ -100,14 +100,14 @@ cp config.example.json ~/.omp/dingtalk.json
 
 ```json
 {
-  "outbound": { "mode": "direct", "directUserIds": ["用户Id"] },
+  "outbound": { "mode": "direct" },
   "stream": {
     "enabled": true,
     "clientId": "用户ClientId",
     "clientSecret": "用户ClientSecret",
     "robotCode": "用户RobotCode"
   },
-  "control": { "scope": "direct", "autoTakeover": false, "allowUserIds": ["用户Id"] },
+  "control": { "scope": "direct", "autoTakeover": false, "allowUserId": "用户Id" },
   "approval": { "mode": "off" },
   "notify": { "sessionStop": true, "errors": true }
 }
@@ -135,7 +135,7 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 
 让用户去给机器人发一条消息，终端打出帧才算真通。
 
-**全绿后收尾**：让用户在**单聊**给机器人发 `/whoami`（`/id`、`我是谁` 也行），把返回的 `senderStaffId` 填进 `control.allowUserIds`（和 `directUserIds`）。这条指令**在白名单之前就能用**——首次接入还没进白名单也能拿到自己的 ID。
+**全绿后收尾**：让用户在**单聊**给机器人发 `/whoami`（`/id`、`我是谁` 也行），把返回的 `senderStaffId` 填进 `control.allowUserId`。这条指令**在白名单之前就能用**——首次接入还没进白名单也能拿到自己的 ID。
 
 ---
 
@@ -144,7 +144,7 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 | 现象 | 判断 / 做法 |
 | --- | --- |
 | 一条通知都没有 | 先 `bun run doctor`。若 doctor 全绿 → 多半是 `notify.onlyWhenTakenOver: true` 而还没 `/dingtalk takeover`（设计行为，不是故障） |
-| 设了 direct 却单聊收不到 | ① `stream.robotCode` 填没填 ② `directUserIds` 是否空 ③ 应用有没有**机器人发送消息**权限、收件人在不在可见范围 |
+| 设了 direct 却单聊收不到 | ① `stream.robotCode` 填没填 ② `control.allowUserId` 是否为空 ③ 应用有没有**机器人发送消息**权限、收件人在不在可见范围 |
 | 通知发到了群里（想要私聊） | `outbound.mode` 没改成 `direct`。自定义机器人只能发群 |
 | 群里 @ 机器人没反应 | 默认 `scope: "direct"` 就是不理群聊。要群聊得改 `group`/`all` |
 | 钉钉发消息没反应 | ① `stream.enabled` 是否 true ② 有没有 `/dingtalk takeover` ③ 群聊是否 @ 了 ④ 应用有没有**发布** ⑤ `bun run watch` 发一条看帧 |

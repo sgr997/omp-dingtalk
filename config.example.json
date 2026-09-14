@@ -24,11 +24,8 @@
   "outbound": {
     "$comment": "通知走哪条路。webhook = 群里那个自定义机器人（只能发群，没法私聊）；direct = 企业内部应用机器人 1:1 私聊推送；both = 两边都发。",
     "mode": "webhook",
-    "$comment_mode": "想「只收单聊、不打扰群」就改成 direct，并把下面的 directUserIds 填上。",
-    "directUserIds": [],
-    "$comment_directUserIds": "单聊收件人的钉钉 userId，也就是入站消息里的 senderStaffId（给机器人发 /id 就能拿到）。",
-    "learnFromInbound": true,
-    "$comment_learnFromInbound": "开启后，白名单里的人给机器人发条消息就自动成为收件人，省得手抄 ID。只认 control.allowUserIds 里的人。"
+    "$comment_mode": "想「只收单聊、不打扰群」就改成 direct。",
+    "$comment_recipient": "单聊推送对象就是 control.allowUserId（白名单里那一个人），没有单独的收件人配置。"
   },
 
   "notify": {
@@ -80,8 +77,8 @@
     "$comment_autoTakeover": "false（推荐）= 每个新会话都要在 omp 里敲 /dingtalk takeover 才接通入站通道。true = 会话一启动就自动接管。",
     "requireAt": true,
     "$comment_requireAt": "群聊里只有 @ 机器人时才响应，避免群里闲聊误触发。scope 为 direct 时无影响。",
-    "allowUserIds": [],
-    "$comment_allowUserIds": "必填。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。留空 = 拒绝所有指令（除 /id 本身），这是故意的安全默认。",
+    "allowUserId": "",
+    "$comment_allowUserId": "必填，只填一个人。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。这个人既能下指令，也是单聊推送的唯一收件人。留空 = 拒绝所有指令（除 /id 本身），这是故意的安全默认。",
     "freeText": true,
     "freeTextDelivery": "steer",
     "$comment_freeTextDelivery": "steer = 打断当前轮次立刻执行；followUp = 等当前轮次跑完再执行。",

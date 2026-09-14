@@ -68,8 +68,8 @@ function explainOutboundGap(cfg: DingTalkConfig): string[] {
 		const { clientId, clientSecret, robotCode } = cfg.stream;
 		if (!clientId || !clientSecret || !robotCode) {
 			lines.push("· 单聊推送要 stream.clientId / clientSecret / robotCode 三样齐全（robotCode 在机器人详情页，ding 开头）。");
-		} else if (cfg.outbound.directUserIds.length === 0) {
-			lines.push("· outbound.directUserIds 为空：先给机器人发一条单聊消息再回来（learnFromInbound 会自动补上）。");
+		} else if (!cfg.control.allowUserId) {
+			lines.push("· control.allowUserId 为空：把 /id 返回的 senderStaffId 填进这个字段才有推送对象。");
 		}
 	}
 	if (lines.length === 0) {
@@ -84,7 +84,6 @@ function explainSendError(result: SendResult, cfg: DingTalkConfig): string[] {
 		return [
 			"单聊推送被钉钉拒绝了。常见原因：",
 			"  · 应用没开「机器人发送消息」权限，或该用户不在应用可见范围内",
-			"  · directUserIds 里填的不是钉钉 userId（应该填 senderStaffId）",
 			`  · 原始响应：${result.errmsg}`,
 		];
 	}
@@ -243,9 +242,9 @@ if (failures === 0) {
 	console.log(`${GREEN}${BOLD}自检通过${RESET} —— 可以正常用了。`);
 	console.log(`\n下一步：`);
 	console.log(`  1. ${whereToTalk(config)}发 ${BOLD}/id${RESET}，拿到 senderStaffId`);
-	console.log(`  2. 填进 control.allowUserIds（否则谁都能控制你的 omp）`);
-	if (config.outbound.mode === "direct" && config.outbound.directUserIds.length === 0) {
-		console.log(`  3. 同一条消息也会把 ${BOLD}${config.control.scope === "direct" ? "你" : "发送者"}${RESET} 记成单聊通知收件人（learnFromInbound）`);
+	console.log(`  2. 填进 control.allowUserId（否则谁都能控制你的 omp）`);
+	if (config.outbound.mode === "direct" && !config.control.allowUserId) {
+		console.log(`  3. allowUserId 那个人就是单聊推送收件人`);
 	}
 	console.log(`  4. 正常启动 omp，用 /dingtalk status 看运行状态；入站要等 /dingtalk takeover 才会接通`);
 } else {

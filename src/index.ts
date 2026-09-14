@@ -156,9 +156,6 @@ class Bridge {
 			statusLines: () => this.statusLines(),
 			isQuiet: () => this.quiet,
 			setQuiet: (value) => this.setQuiet(value),
-			onAuthorizedSender: (senderId) => {
-				this.sender.rememberUser(senderId);
-			},
 		});
 	}
 

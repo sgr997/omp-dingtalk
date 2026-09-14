@@ -192,14 +192,6 @@ export interface RouterDeps {
 	statusLines: () => string[];
 	isQuiet: () => boolean;
 	setQuiet: (value: boolean) => void;
-	/**
-	 * Called for every sender that cleared the allowlist.
-	 *
-	 * Used to learn 1:1 notification recipients. Deliberately *after* the
-	 * allowlist check: a stranger must not be able to subscribe themselves to the
-	 * session's notifications just by messaging the robot.
-	 */
-	onAuthorizedSender?: (senderId: string, nick?: string) => void;
 }
 
 /** Words that must appear alone, so "stop the server" stays a prompt, not an abort. */
@@ -259,11 +251,11 @@ export class CommandRouter {
 		}
 
 		// Fail-closed: an empty allowlist is not an open door. `/id` above still
-		// works, so onboarding is: send /id → fill control.allowUserIds → commands
+		// works, so onboarding is: send /id → fill control.allowUserId → commands
 		// start being accepted.
-		const allow = cfg.control.allowUserIds;
-		if (!allow.includes(senderId)) {
-			log.warn("拒绝未授权指令", { senderId, nick: message.senderNick, allowlistEmpty: allow.length === 0 });
+		const allow = cfg.control.allowUserId;
+		if (!allow || allow !== senderId) {
+			log.warn("拒绝未授权指令", { senderId, nick: message.senderNick, allowlistEmpty: !allow });
 			await this.#reply(
 				message,
 				fmtText(
@@ -271,21 +263,13 @@ export class CommandRouter {
 					[
 						`你的 senderStaffId 是 \`${senderId || "未知"}\`。`,
 						``,
-						allow.length === 0
-							? `本机器人还没配置白名单（\`control.allowUserIds\` 为空 = 拒绝所有指令）。把上面的 ID 填进该配置项即可开启控制。`
-							: `你不在白名单（\`control.allowUserIds\`）中，无法控制 omp。`,
+						!allow
+							? `本机器人还没配置白名单（\`control.allowUserId\` 为空 = 拒绝所有指令）。把上面的 ID 填进该配置项即可开启控制。`
+							: `你不在白名单（\`control.allowUserId\`）中，无法控制 omp。`,
 					].join("\n"),
 				),
 			);
 			return;
-		}
-
-		// Authorized: remember them as a 1:1 notification recipient. Runs even for
-		// empty messages, so `/id` is not the only way to register yourself.
-		try {
-			this.#deps.onAuthorizedSender?.(senderId, message.senderNick);
-		} catch (error) {
-			log.debug("记录通知收件人失败", error);
 		}
 
 		if (!text) {
@@ -559,7 +543,7 @@ export class CommandRouter {
 					`- **senderStaffId**: \`${senderId || "(空)"}\``,
 					`- **昵称**: ${message.senderNick ?? "(未知)"}`,
 					``,
-					`> 把这个 ID 填进 \`control.allowUserIds\`（白名单为空时拒绝所有指令），然后重新发消息即可控制 omp。`,
+					`> 把这个 ID 填进 \`control.allowUserId\`（白名单为空时拒绝所有指令），然后重新发消息即可控制 omp。`,
 				].join("\n"),
 			),
 		);

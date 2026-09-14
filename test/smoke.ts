@@ -29,10 +29,10 @@ const MAIN_CONTROL = {
 	scope: "direct",
 	autoTakeover: true,
 	requireAt: true,
-	// The allowlist is fail-closed: an empty list refuses everything. Test
-	// sections that need an open list set it explicitly; the default carries the
-	// mock sender so ordinary sections stay authorized.
-	allowUserIds: ["staff-smoke"] as string[],
+	// The allowlist is fail-closed: an unset value refuses everything. The one
+	// allowlisted user is also the 1:1 push recipient, so the default carries the
+	// mock sender and ordinary sections stay authorized.
+	allowUserId: "staff-smoke",
 	freeText: true,
 	freeTextDelivery: "steer",
 	replyToSession: true,
@@ -378,7 +378,7 @@ console.log("\n[5] 白名单鉴权");
 	// Re-point config at a copy with an allowlist, then reload via a fresh session.
 	writeFileSync(
 		configPath,
-		JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserIds: ["someone-else"] } }),
+		JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserId: "someone-else" } }),
 	);
 	await fire("session_start", { type: "session_start" });
 	const latest = MockSocket.instances.at(-1)!;
@@ -400,7 +400,7 @@ console.log("\n[5] 白名单鉴权");
 	check("拒绝提示包含 senderStaffId", String(sessionReplies().at(-1)?.body?.markdown?.text ?? "").includes("staff-smoke"));
 
 	// Fail-closed: an EMPTY allowlist refuses everything except /id.
-	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserIds: [] } }));
+	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, allowUserId: "" } }));
 	await fire("session_start", { type: "session_start" });
 	const emptyList = MockSocket.instances.at(-1)!;
 	emptyList.open();
@@ -965,7 +965,8 @@ console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
 		JSON.stringify({
 			webhook: { url: "" },
 			stream: { enabled: false, clientId: "direct-client", clientSecret: "direct-secret", robotCode: "ding-direct" },
-			outbound: { mode: "direct", directUserIds: ["user-1"], learnFromInbound: true },
+			outbound: { mode: "direct" },
+			control: { allowUserId: "user-1" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1000,7 +1001,7 @@ console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
 
 	const pushed = otoPosts().at(-1)?.body;
 	check("推送带上了 robotCode", pushed?.robotCode === "ding-direct", pushed?.robotCode);
-	check("收件人取自 outbound.directUserIds", JSON.stringify(pushed?.userIds) === '["user-1"]', pushed?.userIds);
+	check("收件人取自白名单 control.allowUserId", JSON.stringify(pushed?.userIds) === '["user-1"]', pushed?.userIds);
 	check("消息类型是 sampleMarkdown", pushed?.msgKey === "sampleMarkdown", pushed?.msgKey);
 	check(
 		"换 token 用的是 appKey / appSecret",
@@ -1023,7 +1024,8 @@ console.log("\n[20] outbound.mode = both 时两条通道都发");
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=BOTHTOKEN", secret: "" },
 			stream: { enabled: false, clientId: "both-client", clientSecret: "both-secret", robotCode: "ding-both" },
-			outbound: { mode: "both", directUserIds: ["user-2"], learnFromInbound: false },
+			outbound: { mode: "both" },
+			control: { allowUserId: "user-2" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1049,25 +1051,25 @@ console.log("\n[20] outbound.mode = both 时两条通道都发");
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
-console.log("\n[21] 只把白名单内的人记成通知收件人");
+console.log("\n[21] 白名单里的那个人就是推送收件人");
 {
-	// direct mode with an empty recipient list: nothing can be sent until someone
-	// authorized talks to the robot, which is what `learnFromInbound` is for.
-	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-learn-"));
-	const learnConfig = join(dir, "dingtalk.json");
+	// One config: the allowlisted operator is the recipient. Nothing is learned
+	// from inbound messages, and an unset allowlist means nothing can be sent.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-single-"));
+	const singleConfig = join(dir, "dingtalk.json");
 	writeFileSync(
-		learnConfig,
+		singleConfig,
 		JSON.stringify({
 			webhook: { url: "" },
-			stream: { enabled: true, clientId: "learn-client", clientSecret: "learn-secret", robotCode: "ding-learn" },
-			outbound: { mode: "direct", directUserIds: [], learnFromInbound: true },
-			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct", allowUserIds: ["allowed-user"] },
+			stream: { enabled: true, clientId: "single-client", clientSecret: "single-secret", robotCode: "ding-single" },
+			outbound: { mode: "direct" },
+			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct", allowUserId: "allowed-user" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
-	process.env.OMP_DINGTALK_CONFIG = learnConfig;
+	process.env.OMP_DINGTALK_CONFIG = singleConfig;
 
-	const module = await import(`../src/index.ts?learn=${Date.now()}`);
+	const module = await import(`../src/index.ts?single=${Date.now()}`);
 	const localHandlers = new Map<string, Handler[]>();
 	const localCommands = new Map<string, any>();
 	const localNotices: string[] = [];
@@ -1103,15 +1105,18 @@ console.log("\n[21] 只把白名单内的人记成通知收件人");
 		}
 		return (await recipients()) === n;
 	};
-	check("没有收件人时队列里也没东西可发", (await recipients()) === 0);
+	// The allowlisted user is the recipient from the start — no inbound message
+	// is needed to "learn" them.
+	check("收件人就是白名单里的那个人", await waitForRecipients(1), await recipients());
 
 	// A stranger must not be able to subscribe themselves to the notifications.
 	socket.robot("/ping", { senderStaffId: "stranger" });
 	await tick(200);
-	check("白名单外的人不会被记成收件人", (await recipients()) === 0);
+	check("白名单外的人不会成为收件人", (await recipients()) === 1);
 
 	socket.robot("/ping", { senderStaffId: "allowed-user" });
-	check("白名单内的人被自动记成收件人", await waitForRecipients(1), await recipients());
+	await tick(200);
+	check("白名单内的人发消息后仍是同一个收件人", (await recipients()) === 1);
 
 	const beforeOto = otoPosts().length;
 	await localHandlers.get("session_stop")![0](
@@ -1138,7 +1143,7 @@ console.log("\n[22] scope = direct 时群聊消息一律忽略");
 			// suite running against a session that had quietly stood down.
 			stream: { ...MAIN_CONFIG.stream, clientId: "scope-client", clientSecret: "scope-secret", robotCode: "ding-scope" },
 			outbound: { mode: "webhook" },
-			control: { ...MAIN_CONTROL, scope: "direct", autoTakeover: true, requireAt: true, allowUserIds: ["staff-smoke"] },
+			control: { ...MAIN_CONTROL, scope: "direct", autoTakeover: true, requireAt: true, allowUserId: "staff-smoke" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1178,7 +1183,7 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=SILENTTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "silent-client", clientSecret: "silent-secret", robotCode: "ding-silent" },
 			notify: { onlyWhenTakenOver: true },
-			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserIds: ["staff-smoke"] },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserId: "staff-smoke" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;

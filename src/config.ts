@@ -46,17 +46,6 @@ export interface OutboundConfig {
 	 *   `both`              — post to the group *and* DM.
 	 */
 	mode: "webhook" | "direct" | "both";
-	/** 1:1 recipients, as DingTalk userIds (the `senderStaffId` of inbound messages). */
-	directUserIds: string[];
-	/**
-	 * Add the sender of an authorized inbound message to `directUserIds` at
-	 * runtime, so you do not have to look your own id up by hand.
-	 *
-	 * Only senders that pass `control.allowUserIds` are learned: otherwise a
-	 * stranger who happens to DM the robot would start receiving your session
-	 * notifications.
-	 */
-	learnFromInbound: boolean;
 }
 
 export interface NotifyConfig {
@@ -158,8 +147,11 @@ export interface ControlConfig {
 	 * front of — takeover becomes a deliberate act.
 	 */
 	autoTakeover: boolean;
-	/** Allowlisted `senderStaffId`s. Empty = anyone who can reach the robot (not recommended). */
-	allowUserIds: string[];
+	/**
+	 * The one DingTalk user allowed to command this session, and the recipient
+	 * of its 1:1 pushes. Empty = refuse every inbound command (fail-closed).
+	 */
+	allowUserId: string;
 	/** Plain text (not a slash command) is injected as a prompt. */
 	freeText: boolean;
 	/** `steer` interrupts the current run; `followUp` waits for it to finish. */
@@ -233,7 +225,7 @@ const DEFAULTS: DingTalkConfig = {
 	enabled: true,
 	webhook: { url: "", secret: "", keyword: "" },
 	stream: { enabled: false, clientId: "", clientSecret: "", robotCode: "" },
-	outbound: { mode: "webhook", directUserIds: [], learnFromInbound: true },
+	outbound: { mode: "webhook" },
 	notify: {
 		turnEnd: { enabled: false, minDurationMs: 60_000 },
 		sessionStop: true,
@@ -263,7 +255,7 @@ const DEFAULTS: DingTalkConfig = {
 		scope: "direct",
 		requireAt: true,
 		autoTakeover: false,
-		allowUserIds: [],
+		allowUserId: "",
 		freeText: true,
 		freeTextDelivery: "steer",
 		replyToSession: true,
@@ -342,22 +334,8 @@ function envOverrides(): Record<string, any> {
 	if (env.DINGTALK_OUTBOUND_MODE) {
 		out.outbound = { ...out.outbound, mode: env.DINGTALK_OUTBOUND_MODE.trim() };
 	}
-	if (env.DINGTALK_DIRECT_USER_IDS) {
-		out.outbound = {
-			...out.outbound,
-			directUserIds: env.DINGTALK_DIRECT_USER_IDS.split(",")
-				.map((id) => id.trim())
-				.filter(Boolean),
-		};
-	}
-
-	if (env.DINGTALK_ALLOW_USER_IDS) {
-		out.control = {
-			...out.control,
-			allowUserIds: env.DINGTALK_ALLOW_USER_IDS.split(",")
-				.map((id) => id.trim())
-				.filter(Boolean),
-		};
+	if (env.DINGTALK_ALLOW_USER_ID) {
+		out.control = { ...out.control, allowUserId: env.DINGTALK_ALLOW_USER_ID.trim() };
 	}
 	if (env.DINGTALK_APPROVAL_MODE) {
 		out.approval = { ...out.approval, mode: env.DINGTALK_APPROVAL_MODE.trim() };
@@ -416,13 +394,19 @@ export function loadConfig(cwd: string): LoadedConfig {
 		warnings.push("question.timeoutMs 无效，已回退为 600000（10 分钟）。");
 		config.question.timeoutMs = 600_000;
 	}
-	config.control.allowUserIds = (Array.isArray(config.control.allowUserIds) ? config.control.allowUserIds : [])
-		.map((id) => String(id).trim())
-		.filter(Boolean);
-	config.outbound.directUserIds = (Array.isArray(config.outbound.directUserIds) ? config.outbound.directUserIds : [])
-		.map((id) => String(id).trim())
-		.filter(Boolean);
-	config.outbound.learnFromInbound = config.outbound.learnFromInbound !== false;
+	// Migration: a single `allowUserId` replaced the old `allowUserIds` array and
+	// `outbound.directUserIds` (the allowlist now doubles as the push recipient).
+	// Read the old keys once, so an existing config does not silently fail closed.
+	if (!config.control.allowUserId) {
+		const pick = (value: unknown): string =>
+			Array.isArray(value) ? String(value.find((v) => typeof v === "string" && v.trim()) ?? "").trim() : "";
+		const legacy = pick((config.control as unknown as Record<string, unknown>).allowUserIds) || pick((config.outbound as unknown as Record<string, unknown>).directUserIds);
+		if (legacy) {
+			config.control.allowUserId = legacy;
+			warnings.push("检测到旧版 control.allowUserIds / outbound.directUserIds，已迁移到 control.allowUserId（只保留第一个人）。请更新配置文件后删除旧字段。");
+		}
+	}
+	config.control.allowUserId = typeof config.control.allowUserId === "string" ? config.control.allowUserId.trim() : "";
 	config.notify.onlyWhenTakenOver = config.notify.onlyWhenTakenOver === true;
 
 	// A typo in `outbound.mode` must not silently pick a transport for you.
@@ -454,10 +438,11 @@ export function loadConfig(cwd: string): LoadedConfig {
 	config.control.requireAt = config.control.requireAt !== false;
 	config.control.autoTakeover = config.control.autoTakeover === true;
 
-	// Empty allowlist = every inbound command is refused (fail-closed). That is
-	// the safe default, but it is surprising mid-onboarding, so say it out loud.
-	if (config.control.enabled && config.control.allowUserIds.length === 0) {
-		warnings.push("control.allowUserIds 为空：除 /id 外所有入站指令都会被拒绝。把 /id 返回的 senderStaffId 填进去才能控制 omp。");
+	// Empty allowUserId = every inbound command is refused (fail-closed). That
+	// is the safe default, but it is surprising mid-onboarding, so say it out
+	// loud.
+	if (config.control.enabled && !config.control.allowUserId) {
+		warnings.push("control.allowUserId 为空：除 /id 外所有入站指令都会被拒绝。把 /id 返回的 senderStaffId 填进这个字段才能控制 omp。");
 	}
 
 	// The stream channel is only usable with real credentials.
@@ -477,13 +462,8 @@ export function loadConfig(cwd: string): LoadedConfig {
 	}
 	if (wantsDirect && !hasDirectCreds) {
 		warnings.push('outbound.mode 含 "direct"，但缺少 stream.clientId / clientSecret / robotCode：单聊推送发不出去。');
-	} else if (wantsDirect && config.outbound.directUserIds.length === 0) {
-		warnings.push(
-			'outbound.mode 含 "direct"，但 outbound.directUserIds 为空：暂时没有收件人。' +
-				(config.outbound.learnFromInbound
-					? "（白名单内的人给机器人发条消息就会自动补上）"
-					: "（learnFromInbound 已关闭，需要手动填钉钉 userId）"),
-		);
+	} else if (wantsDirect && !config.control.allowUserId) {
+		warnings.push('outbound.mode 含 "direct"，但 control.allowUserId 为空：没有推送对象（白名单的这一个人就是推送收件人）。');
 	}
 
 	// Nothing can be sent without a usable outbound transport, and nothing can be
@@ -524,13 +504,13 @@ export function describeConfig(loaded: LoadedConfig): string[] {
 		`出站 webhook: ${config.webhook.url ? "已配置" : "未配置"} (token ${mask(token)})`,
 		`加签密钥: ${mask(config.webhook.secret)}`,
 		`关键词: ${config.webhook.keyword || "(未设置)"}`,
-		`单聊收件人: ${config.outbound.directUserIds.length ? config.outbound.directUserIds.join(", ") : "(空)"}`,
+		`单聊收件人: ${config.control.allowUserId || "(空)"}`,
 		`入站 Stream: ${config.stream.enabled ? "已启用" : "未启用"} (clientId ${mask(config.stream.clientId)})`,
 		`控制范围: ${SCOPE_LABELS[config.control.scope] ?? config.control.scope}`,
 		`接管方式: ${config.control.autoTakeover ? "会话启动时自动接管" : "需在会话内执行 /dingtalk takeover"}`,
 		`审批模式: ${config.approval.mode}`,
 	`远程提问: ${config.question.enabled ? `已启用（超时 ${Math.round(config.question.timeoutMs / 1000)}s）` : "已关闭"}`,
-		`指令白名单: ${config.control.allowUserIds.length ? config.control.allowUserIds.join(", ") : "(空 — 任何能触达机器人的人都可控制)"}`,
+		`指令白名单: ${config.control.allowUserId || "(空 — 拒绝所有指令)"}`,
 		`静音: ${config.quiet ? "是" : "否"}`,
 		`接管前静默: ${config.notify.onlyWhenTakenOver ? "是（接管后才开始发通知）" : "否"}`,
 		`配置来源: ${loaded.sources.length ? loaded.sources.join(" | ") : "(全部使用默认值)"}`,
