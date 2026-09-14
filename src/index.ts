@@ -27,12 +27,20 @@ import type { ExtensionAPI } from "./pi-types";
 import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
 import {
+	buildAskTimeoutResult,
+	buildRemoteAskResult,
+	registerAskTool,
+	type AskRaceBridge,
+	type AskRaceRequest,
+	type AskToolResult,
+} from "./ask-tool";
+import {
 	fmtApprovalBlocked,
 	fmtApprovalRequest,
 	fmtApprovalResolved,
 	fmtError,
 	fmtHelp,
-	fmtQuestionBlocked,
+	fmtQuestionAnsweredLocally,
 	fmtQuestionRequest,
 	fmtQuestionTimeout,
 	fmtSessionStop,
@@ -46,7 +54,7 @@ import {
 import { createLogger, type Logger } from "./logger";
 import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
 import { ApprovalRegistry, CommandRouter, type ApiLike, type ApprovalDecision, type CtxLike, type PendingApproval } from "./router";
-import { hashQuestions, QuestionRegistry, type PendingQuestion, type RemoteQuestion } from "./questions";
+import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./questions";
 import { DingTalkStream, type StreamStatus } from "./stream";
 import { extractText, extractToolNames, safeJson, truncate, truncatePath } from "./util";
 import { createHash } from "node:crypto";
@@ -54,8 +62,6 @@ import { basename } from "node:path";
 
 /** Custom session-entry namespace used to persist the mute flag across resumes. */
 const STATE_ENTRY = "com.omp-dingtalk.state";
-/** The omp/pi tool that prompts the user with a multiple-choice dialog. */
-const ASK_TOOL_NAME = "ask";
 /**
  * Hard cap on the shutdown notification send.
  *
@@ -255,81 +261,126 @@ class Bridge {
 	}
 
 	/**
-	 * Intercept the agent's `ask` tool while DingTalk is in control.
+	 * Race the local TUI dialog against a DingTalk answer.
 	 *
-	 * The ask tool opens a local TUI dialog and blocks the turn until someone
-	 * answers. With takeover active nobody is at the terminal, so the turn would
-	 * hang forever. We block the call (its reason text tells the model to stop
-	 * and wait), push the questions to DingTalk, and the router settles them
-	 * from the reply. Returns undefined when this session cannot act as the
-	 * human (not in control / no outbound / disabled), in which case the native
-	 * TUI dialog runs as usual.
+	 * Called from the re-registered `ask` tool (`ask-tool.ts`), which is the only
+	 * place that holds the call's `AbortSignal`. Both surfaces show the same
+	 * questions, the first answer wins, and the loser is cancelled so it cannot
+	 * settle a question that is already closed.
+	 *
+	 * Returns `undefined` when this session cannot act as the human (not in
+	 * control / no outbound / disabled / an identical question is already
+	 * pending), in which case the caller runs the native dialog alone.
 	 */
-	handleAskToolCall(event: { toolName?: string; input?: Record<string, unknown> }): { block: true; reason: string } | undefined {
+	async runAskRace(request: AskRaceRequest): Promise<AskToolResult | undefined> {
 		if (!this.cfg.enabled || !this.cfg.question.enabled) return undefined;
-		if (String(event?.toolName ?? "") !== ASK_TOOL_NAME) return undefined;
-		// Only reroute while DingTalk is the one driving the session. Without a
-		// takeover there is no inbound channel, so nobody could answer remotely —
-		// leave the local dialog alone.
+		// Without a takeover there is no inbound channel, so nobody could answer
+		// remotely — leave the local dialog alone.
 		if (!this.takenOver) {
-			this.log.debug("ask 工具未接管会话，留在本地对话框");
+			this.log.debug("ask 未接管会话，只走本地对话框");
 			return undefined;
 		}
 		if (!this.sender.configured) {
-			this.log.warn("提问转发需要可用的出站通道，本次留在本地对话框");
+			this.log.warn("双端提问需要可用的出站通道，本次只走本地对话框");
 			return undefined;
 		}
-
-		const questions = extractAskQuestions(event?.input);
-		if (!questions) return undefined; // Malformed — let OMP validate it.
+		const questions = request.questions;
+		if (questions.length === 0) return undefined;
 
 		const hash = hashQuestions(questions);
 		const timeoutMs = this.cfg.question.timeoutMs;
+
+		// The DingTalk side settles through the registry (the router answers it);
+		// this deferred carries that settlement into the race. An empty item list
+		// means nobody answered — a timeout or a retraction, not a real answer.
+		let settleRemote: ((answer: QuestionAnswerPayload | null) => void) | undefined;
+		const remoteAnswered = new Promise<QuestionAnswerPayload | null>((resolve) => {
+			settleRemote = resolve;
+		});
+
+		let reused = false;
 		const pending = this.questions.register({
 			questions,
 			hash,
 			timeoutMs,
 			onRegistered: (question) => {
-				this.log.info(`远程提问 ${question.id} 已推送`, { count: questions.length });
+				this.log.info(`远程提问 ${question.id} 已推送（本地对话框同时打开）`, { count: questions.length });
 				this.notify(fmtQuestionRequest({ id: question.id, questions, timeoutMs }), {
 					priority: "high",
 					bypassQuiet: true,
 				});
 			},
 			duplicate: (existing) => {
-				this.log.info(`远程提问去重：复用 ${existing.id}`);
+				// An identical question set is already pending. Two local dialogs
+				// racing one registry row is not a state worth supporting, so this
+				// call falls back to the plain native dialog.
+				reused = true;
+				this.log.info(`远程提问去重：复用 ${existing.id}，本次只走本地对话框`);
 			},
 			onTimeout: (question) => {
 				this.#questionTimeout(question);
 			},
+			onSettled: (answer) => {
+				settleRemote?.(answer.items.length > 0 ? answer : null);
+			},
 		});
-		return { block: true, reason: fmtQuestionBlocked({ id: pending.id, questions, timeoutMs }) };
+		if (reused) return undefined;
+
+		const localAbort = new AbortController();
+		const localPromise = request.runLocal(localAbort.signal).then(
+			(result) => ({ source: "local" as const, result }),
+			(error: unknown) => ({ source: "local-error" as const, error }),
+		);
+		const remotePromise = remoteAnswered.then((answer) => ({ source: "remote" as const, answer }));
+
+		const winner = await Promise.race([localPromise, remotePromise]);
+
+		if (winner.source === "local") {
+			// Someone at the terminal answered first. Retract the DingTalk copy so
+			// a late reply cannot settle a question that is already closed.
+			if (this.questions.drop(pending.id, "已在本地 TUI 回答")) {
+				this.notify(fmtQuestionAnsweredLocally({ id: pending.id, questions }), {
+					priority: "low",
+					bypassQuiet: true,
+				});
+			}
+			this.log.info(`提问 ${pending.id} 已在本地 TUI 回答，撤回钉钉推送`);
+			return winner.result;
+		}
+
+		if (winner.source === "local-error") {
+			// The local dialog was cancelled (Esc) or the whole turn was aborted.
+			// That is not an answer: drop the DingTalk copy and surface the same
+			// error the native tool would have thrown.
+			this.questions.drop(pending.id, "本地对话框已取消");
+			throw winner.error;
+		}
+
+		if (winner.answer) {
+			// DingTalk answered first — close the local dialog.
+			localAbort.abort();
+			this.log.info(`提问 ${pending.id} 已在钉钉回答，关闭本地对话框`);
+			return buildRemoteAskResult(winner.answer);
+		}
+
+		// Empty settlement: the DingTalk window elapsed with no answer. Close the
+		// local dialog too and hand the decision back to the model, so a turn can
+		// never stay blocked on a phone nobody is holding.
+		localAbort.abort();
+		this.log.info(`提问 ${pending.id} 无人回答，交回模型自行决定`);
+		return buildAskTimeoutResult({ id: pending.id, questions, timeoutMs });
 	}
 
+	/**
+	 * The DingTalk window elapsed. Tell the human, and let the racer hand the
+	 * decision back to the model — the timeout must never leave the turn blocked.
+	 */
 	#questionTimeout(question: PendingQuestion): void {
-		const timeoutMs = question.timeoutMs;
-		this.log.info(`远程提问 ${question.id} 超时，告知 omp 自行决定`);
-		// The agent was already told to stop and wait; give it permission to
-		// move on and tell the human what happened.
-		try {
-			const texts = question.questions
-				.map((q) => {
-					const recommended =
-						q.recommended !== undefined && q.options[q.recommended] ? `（推荐：${q.options[q.recommended]!.label}）` : "";
-					return `- ${q.question}${recommended}`;
-				})
-				.join("\n");
-			this.#pi.sendUserMessage(
-				`（钉钉远程提问 #${question.id} 在 ${Math.round(timeoutMs / 1000)}s 内未收到回答）\n${texts}\n\n请自行决定如何继续：按你判断的最合理默认方案继续，必要时换一种方式说明。`,
-				{ deliverAs: "followUp" },
-			);
-		} catch (error) {
-			this.log.error("通知 omp 提问超时失败", error);
-		}
-		this.notify(fmtQuestionTimeout({ id: question.id, questions: question.questions, timeoutMs }), {
-			priority: "normal",
-			bypassQuiet: true,
-		});
+		this.log.info(`远程提问 ${question.id} 超时（${question.timeoutMs}ms）`);
+		this.notify(
+			fmtQuestionTimeout({ id: question.id, questions: question.questions, timeoutMs: question.timeoutMs }),
+			{ priority: "normal", bypassQuiet: true },
+		);
 	}
 
 	/** An approval timed out: tell omp the outcome so the turn never hangs. */
@@ -654,50 +705,6 @@ function matchApprovalRules(event: { toolName?: string; input?: Record<string, u
 	return null;
 }
 
-/**
- * Coerce an `ask` tool call's raw input into a question list.
- *
- * The input is untrusted (partially streamed or model-mangled), so anything
- * that does not look like a usable question is rejected and left to OMP's own
- * validation. Questions with no options are kept — the answer is then free text.
- */
-function extractAskQuestions(input: unknown): RemoteQuestion[] | undefined {
-	const questions = (input as { questions?: unknown } | undefined)?.questions;
-	if (!Array.isArray(questions) || questions.length === 0) return undefined;
-
-	const out: RemoteQuestion[] = [];
-	for (const raw of questions) {
-		if (!raw || typeof raw !== "object") return undefined;
-		const q = raw as Record<string, any>;
-		const question = typeof q.question === "string" ? q.question.trim() : "";
-		if (!question) return undefined;
-
-		const options: RemoteQuestion["options"] = [];
-		if (q.options !== undefined) {
-			if (!Array.isArray(q.options)) return undefined;
-			for (const option of q.options) {
-				if (!option || typeof option !== "object" || typeof option.label !== "string") return undefined;
-				options.push({
-					label: option.label,
-					...(typeof option.description === "string" && option.description.trim()
-						? { description: option.description.trim() }
-						: {}),
-				});
-			}
-		}
-
-		out.push({
-			id: typeof q.id === "string" && q.id.trim() ? q.id.trim() : `q${out.length + 1}`,
-			question,
-			...(typeof q.header === "string" && q.header.trim() ? { header: q.header.trim() } : {}),
-			options,
-			multi: q.multi === true,
-			...(typeof q.recommended === "number" && q.recommended >= 0 ? { recommended: q.recommended } : {}),
-		});
-	}
-	return out;
-}
-
 /** Readable rendering of a tool call for the approval prompt. */
 function describeToolCall(event: { toolName?: string; input?: Record<string, unknown> }): string {
 	const toolName = String(event.toolName ?? "");
@@ -828,6 +835,19 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				return undefined;
 			}
 		};
+
+	/**
+	 * Race handler for the re-registered `ask` tool, or `undefined` when this
+	 * binding must not act on `ctx` — a subagent's copy of the plugin, or a
+	 * session other than the bridge's own. Returning `undefined` leaves the
+	 * native dialog in charge.
+	 */
+	const askBridgeFor = (ctx: any): AskRaceBridge | undefined => {
+		if (!ownsPlugin(ctx) || isForeignSession(ctx)) return undefined;
+		const b = ensure(ctx?.cwd ?? process.cwd());
+		b.ctx = ctx;
+		return { runAskRace: (request: AskRaceRequest) => b.runAskRace(request) };
+	};
 
 	// -------------------------------------------------------------------------
 	// Session lifecycle
@@ -1006,11 +1026,10 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
 
-			// Remote questions: while DingTalk drives the session, the agent's
-			// local ask dialog is unreachable — reroute it to the phone. This
-			// runs before the approval gate so `ask` never double-pings.
-			const askGate = b.handleAskToolCall(event);
-			if (askGate) return askGate;
+			// NOTE: `ask` is deliberately not intercepted here. The plugin
+			// re-registers the tool (`ask-tool.ts`) so that it owns the call and
+			// can race the TUI dialog against DingTalk; returning `{block: true}`
+			// from this handler would stop the dialog from ever appearing.
 
 			if (!b.cfg.enabled || b.cfg.approval.mode !== "remote") return undefined;
 			if (!b.sender.configured) {
@@ -1336,6 +1355,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		});
 	} else {
 		createLogger(api.logger).warn("pi.zod 不可用，跳过 dingtalk_notify 工具注册");
+	}
+
+	// Re-register `ask` so this plugin owns the call and can race the local TUI
+	// dialog against DingTalk — see `ask-tool.ts` for why re-registration is the
+	// only way an extension can do this.
+	if (!registerAskTool(pi, askBridgeFor)) {
+		createLogger(api.logger).warn("pi.zod 不可用，ask 保持原生行为（无法双端提问）");
 	}
 }
 

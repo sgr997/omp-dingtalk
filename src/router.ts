@@ -447,8 +447,12 @@ export class CommandRouter {
 		this.#deps.log.info(`远程提问 ${answer.id} 已回答`, { items: answer.items.length, from: by });
 		await this.#reply(message, fmtQuestionAnswerEcho({ id: answer.id, items: answer.items, by }));
 
-		// Deliver the answer as a fresh user message so the model continues with
-		// the question and answer both in context.
+		// A dual-surface racer is holding the `ask` call open, and the answer
+		// becomes that call's own result — injecting it again would answer twice.
+		if (result.raced) return;
+
+		// Otherwise the model never saw a dialog at all, so deliver the answer as
+		// a fresh user message with the question and answer both in context.
 		this.#deps.pi.sendUserMessage(formatQuestionInjection({ id: answer.id, items: answer.items, by }), {
 			deliverAs: "steer",
 		});
