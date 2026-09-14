@@ -723,7 +723,23 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 // Extension factory
 // ---------------------------------------------------------------------------
 
+/**
+ * Which factory invocation owns the plugin in this process.
+ *
+ * The host rebinds this factory once per session — the interactive session gets
+ * one copy, a subagent session gets its own, usually in a different cwd — and
+ * every copy keeps a private `bridge`. A subagent's copy would therefore build a
+ * bridge for the subagent's cwd and push the subagent's retries, turn ends and
+ * exit under a wrong session label. Ownership is process-wide instead: the first
+ * binding to see a session id claims the plugin and every other binding stays
+ * inert (no bridge, no notifications).
+ */
+let ownerBinding: symbol | undefined;
+
 export default function ompDingTalk(pi: ExtensionAPI): void {
+	/** Identity of this factory invocation; compared against {@link ownerBinding}. */
+	const binding = Symbol("omp-dingtalk-binding");
+
 	const api = pi as unknown as ApiLike & {
 		appendEntry?: (customType: string, data?: unknown) => void;
 		logger?: unknown;
@@ -767,23 +783,43 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		}
 	};
 
+	/**
+	 * Process-wide ownership: may this factory invocation act on `ctx`?
+	 *
+	 * The host rebinds this factory once per session, so a subagent's events
+	 * arrive on handlers that closed over a different, still empty `bridge`. The
+	 * first binding to see a session id owns the plugin; a later binding is a
+	 * subagent session and stays inert, otherwise it builds a bridge for the
+	 * subagent's cwd and pushes under a bogus session label. Events without a
+	 * session id (older hosts, test doubles) keep the pre-gate behavior.
+	 */
+	const ownsPlugin = (ctx: any): boolean => {
+		const id = sessionIdOf(ctx);
+		if (!id) return true;
+		if (ownerBinding === undefined) ownerBinding = binding;
+		return ownerBinding === binding;
+	};
+
+	/** True when `ctx` belongs to a different session than this binding's bridge. */
+	const isForeignSession = (ctx: any, id = sessionIdOf(ctx)): boolean =>
+		Boolean(id && bridge?.sessionId && id !== bridge.sessionId);
+
 	/** Wrap a handler so nothing it does can escape into the host. */
 	const safe =
 		(name: string, handler: (event: any, ctx: any) => unknown) =>
 		async (event: any, ctx: any): Promise<unknown> => {
 			try {
-				// A subagent runs its own extension runner against this same
-				// in-process module, so its lifecycle events land here with a
-				// different session id. The bridge belongs to one session: ignore
-				// anything that does not carry the bridge's own id, otherwise a
-				// subagent's session_shutdown would push an "omp 已退出" card and
-				// dispose the live stream mid-run. `session_start` is handled
-				// separately (before `ensure`, so a subagent start with a different
-				// cwd cannot dispose the main bridge); events without a session id
-				// (older hosts, test doubles) keep the pre-gate behavior.
+				if (!ownsPlugin(ctx)) return undefined;
+				// A subagent sharing this binding's cwd carries a different session
+				// id. The bridge belongs to one session: ignore anything that does
+				// not carry the bridge's own id, otherwise a subagent's
+				// session_shutdown would push an "omp 已退出" card and dispose the
+				// live stream mid-run. `session_start` is handled separately (before
+				// `ensure`, so a foreign start in a different cwd cannot dispose the
+				// main bridge).
 				const incomingId = name === "session_start" ? undefined : sessionIdOf(ctx);
-				if (incomingId && bridge?.sessionId && incomingId !== bridge.sessionId) {
-					bridge.log.debug(`忽略来自其他会话（子代理）的 ${name} 事件`);
+				if (incomingId && isForeignSession(ctx, incomingId)) {
+					bridge?.log.debug(`忽略来自其他会话（子代理）的 ${name} 事件`);
 					return undefined;
 				}
 				return await handler(event, ctx);
@@ -1151,6 +1187,10 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		},
 		handler: async (args: string, ctx: any) => {
 			try {
+				if (!ownsPlugin(ctx)) {
+					ctx?.ui?.notify?.("当前是子代理会话，钉钉由主会话负责。", "error");
+					return;
+				}
 				const b = ensure(ctx?.cwd ?? process.cwd());
 				b.ctx = ctx;
 				const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
@@ -1265,6 +1305,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				// context structurally instead of trusting a position.
 				const candidates = [argA, argB, argC];
 				const ctx = candidates.find((c) => c && typeof c === "object" && ("cwd" in c || "ui" in c)) as any;
+				if (!ownsPlugin(ctx) || isForeignSession(ctx)) {
+					return {
+						content: [{ type: "text" as const, text: "通知未发送：当前会话不拥有钉钉通道（子代理会话由主会话负责）。" }],
+						details: { sent: false, errcode: undefined as number | undefined },
+						isError: true,
+					};
+				}
 				const b = ensure(ctx?.cwd ?? process.cwd());
 				b.ctx = ctx;
 				const blocked = b.pushBlockedReason;

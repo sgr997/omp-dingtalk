@@ -1554,6 +1554,50 @@ console.log("\n[29] 样例配置的开箱状态（防止占位值被当成已配
 	);
 }
 
+console.log("\n[30] 子代理在独立 cwd 里绑定自己的副本时保持静默（进程级归属）");
+{
+	// The host rebinds the factory once per session, so a subagent in its own cwd
+	// gets its own copy of the plugin — and, without a process-wide owner, its own
+	// bridge pushing the subagent's retries under a bogus session label. Only the
+	// first binding (the interactive session) may act.
+	const module = await import(`../src/index.ts?owner=${Date.now()}`);
+	const bind = (): Map<string, Handler[]> => {
+		const bound = new Map<string, Handler[]>();
+		const localPi: any = {
+			...pi,
+			on: (e: string, h: Handler) => bound.set(e, [...(bound.get(e) ?? []), h]),
+		};
+		module.default(localPi);
+		return bound;
+	};
+	const mainHandlers = bind();
+	const subHandlers = bind();
+	const sessionCtx = (id: string, cwd: string) => ({
+		...ctx,
+		cwd,
+		sessionManager: { getBranch: () => [], getSessionId: () => id },
+	});
+	const mainCtx = sessionCtx("session-main", "/tmp/owner-main");
+	const subCtx = sessionCtx("session-sub", "/tmp/owner-sub");
+	const retry = () => ({ type: "auto_retry_start", attempt: 4, maxAttempts: 10, delayMs: 3_000, errorMessage: "boom" });
+
+	await mainHandlers.get("session_start")![0]({ type: "session_start" }, mainCtx);
+	await tick(200);
+	const postsBefore = webhookPosts().length;
+	const socketsBefore = MockSocket.instances.length;
+
+	await subHandlers.get("session_start")![0]({ type: "session_start" }, subCtx);
+	await subHandlers.get("auto_retry_start")![0](retry(), subCtx);
+	await subHandlers.get("session_shutdown")![0]({ type: "session_shutdown" }, subCtx);
+	await tick(200);
+	check("子代理绑定的副本不推送任何内容", webhookPosts().length === postsBefore, webhookPosts().length - postsBefore);
+	check("子代理绑定的副本不建立连接", MockSocket.instances.length === socketsBefore, MockSocket.instances.length);
+
+	await mainHandlers.get("auto_retry_start")![0](retry(), mainCtx);
+	await tick(200);
+	check("主会话绑定的重试照常推送", webhookPosts().length > postsBefore, webhookPosts().length - postsBefore);
+}
+
 // --- summary ----------------------------------------------------------------
 console.log(`\n${"=".repeat(56)}`);
 if (failures.length === 0) {
