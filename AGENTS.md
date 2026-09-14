@@ -81,6 +81,8 @@ omp plugin list
 
 **Windows 普通用户**建不了符号链接，`link` 会留空目录。用目录联接替代（README.md 第 2 节有现成命令）。
 
+**源码工作副本别用 install.sh**——它会先 `rm -rf` 目标目录，默认目标正好是源码目录时会把整份代码删掉（脚本检测到目标目录是 git 工作副本会直接拒绝）。源码副本用 `omp plugin link` 或 `git pull` 更新。
+
 ---
 
 ## 4. 写配置
