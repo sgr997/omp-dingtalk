@@ -852,12 +852,15 @@ console.log("\n[14] /dingtalk 本地命令");
 	check("本地 status 输出配置摘要", (notices.at(-1)?.includes("入站 Stream") ?? false), notices.at(-1));
 }
 
-console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover");
+console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover；接管跨会话保留");
 {
-	// Same credentials, but `autoTakeover` left off: the session must stay inert
-	// until the terminal asks for control. It must also *drop* control inherited
-	// from the previous session.
+	// `autoTakeover` off: the session stays inert until the terminal asks for
+	// control. Start from a clean, released state so an inherited takeover from an
+	// earlier section does not mask the test.
 	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, autoTakeover: false } }));
+	await commands.get("dingtalk").handler("release", ctx);
+	await tick(100);
+
 	// Snapshot the posts first: a notification still queued from an earlier
 	// section can be delivered after this one, so "the last post" is not a safe
 	// way to find this section's own message.
@@ -881,6 +884,15 @@ console.log("\n[15] 默认不自动接管，需显式 /dingtalk takeover");
 		await waitFor(() => MockSocket.instances.at(-1)?.readyState === 0),
 		MockSocket.instances.map((s) => s.readyState),
 	);
+
+	// A fresh session_start in the same process must NOT drop the takeover the
+	// user asked for: autoTakeover=false only stops auto-connecting, it must not
+	// silently release a takeover the user took explicitly.
+	const socketsKept = MockSocket.instances.length;
+	const liveState = MockSocket.instances.at(-1)?.readyState;
+	await fire("session_start", { type: "session_start" });
+	await tick(200);
+	check("新会话启动不释放已有接管（连接保持）", MockSocket.instances.length === socketsKept && MockSocket.instances.at(-1)?.readyState === liveState, MockSocket.instances.length);
 
 	await commands.get("dingtalk").handler("status", ctx);
 	check("本地 status 显示接管状态", String(notices.at(-1) ?? "").includes("钉钉接管"), String(notices.at(-1) ?? "").slice(0, 400));
@@ -1456,6 +1468,71 @@ console.log("\n[27] 退出清理");
 	check("session_shutdown 未抛异常", true);
 	check("已建立过连接", MockSocket.instances.length >= before);
 	await tick(150);
+}
+
+console.log("\n[28] 子代理会话的事件被忽略（不推送退出、不拆主会话的桥）");
+{
+	// A subagent runs its own extension runner against the same in-process
+	// module, so its session_start/session_shutdown land on these handlers with a
+	// different session id. Only the session that owns the bridge may act.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-subagent-"));
+	const cfgPath = join(dir, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "" },
+			stream: { enabled: true, clientId: "subagent-client", clientSecret: "subagent-secret", robotCode: "ding-subagent" },
+			outbound: { mode: "direct" },
+			control: { allowUserId: "user-1" },
+			notify: { sessionShutdown: true },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+
+	const module = await import(`../src/index.ts?subagent=${Date.now()}`);
+	const localHandlers = new Map<string, Handler[]>();
+	const localCommands = new Map<string, any>();
+	const localPi: any = {
+		...pi,
+		on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]),
+		registerCommand: (n: string, o: any) => localCommands.set(n, o),
+	};
+	module.default(localPi);
+
+	const mainCtx: any = { ...ctx, sessionManager: { getBranch: () => [], getSessionId: () => "session-main" } };
+	const subCtx: any = { ...ctx, sessionManager: { getBranch: () => [], getSessionId: () => "session-sub" } };
+
+	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
+	const lockCount = () => readdirSync(lockRoot).filter((f) => f.includes("takeover")).length;
+
+	await tick(200);
+	const socketsBefore = MockSocket.instances.length;
+	const locksBefore = lockCount();
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, mainCtx);
+	await localCommands.get("dingtalk").handler("takeover", mainCtx);
+	check("主会话接管后建立了 Stream 连接", await waitFor(() => MockSocket.instances.length > socketsBefore, 4_000));
+	check("主会话接管后写入锁文件", lockCount() > locksBefore);
+	const socketsLive = MockSocket.instances.length;
+	const locksLive = lockCount();
+	const liveSocket = MockSocket.instances.at(-1)!;
+
+	const otoBefore = otoPosts().length;
+
+	// The subagent leaving must not look like the session exiting.
+	await localHandlers.get("session_shutdown")![0]({ type: "session_shutdown" }, subCtx);
+	await tick(200);
+	check("子代理退出不推送「omp 已退出」", otoPosts().length === otoBefore, otoPosts().length - otoBefore);
+	check("子代理退出不释放主会话的接管锁", lockCount() === locksLive, lockCount());
+	check("子代理退出不建立新连接", MockSocket.instances.length === socketsLive, MockSocket.instances.length);
+	check("子代理退出后主会话连接仍然打开", liveSocket.readyState !== 3, liveSocket.readyState);
+
+	// The owning session's own shutdown still announces the exit.
+	await localHandlers.get("session_shutdown")![0]({ type: "session_shutdown" }, mainCtx);
+	await tick(200);
+	check("主会话退出才推送「omp 已退出」", otoPosts().length > otoBefore, otoPosts().length - otoBefore);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
 // --- summary ----------------------------------------------------------------

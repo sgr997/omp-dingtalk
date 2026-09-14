@@ -117,6 +117,14 @@ class Bridge {
 	turnCount = 0;
 	turnStartedAt = new Map<number, number>();
 	ctx: CtxLike | undefined;
+	/**
+	 * Session id of the omp session that owns this bridge. Set at the first
+	 * `session_start`. A subagent runs its own extension runner against this same
+	 * in-process module (preparedExtensions are shared), so its lifecycle events
+	 * arrive with a *different* session id — the handlers use this field to tell
+	 * the subagent's noise from the session that actually owns the channel.
+	 */
+	sessionId: string | undefined;
 	stream: DingTalkStream | undefined;
 	streamStatus: StreamStatus = { state: "idle", reconnects: 0 };
 	/**
@@ -746,11 +754,38 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		return bridge;
 	};
 
+	/**
+	 * Session id of the current host ctx, when the host exposes one. Subagent
+	 * sessions have their own session manager, so their events carry a different
+	 * id than the main session that owns the bridge.
+	 */
+	const sessionIdOf = (ctx: any): string | undefined => {
+		try {
+			return ctx?.sessionManager?.getSessionId?.() ?? undefined;
+		} catch {
+			return undefined;
+		}
+	};
+
 	/** Wrap a handler so nothing it does can escape into the host. */
 	const safe =
 		(name: string, handler: (event: any, ctx: any) => unknown) =>
 		async (event: any, ctx: any): Promise<unknown> => {
 			try {
+				// A subagent runs its own extension runner against this same
+				// in-process module, so its lifecycle events land here with a
+				// different session id. The bridge belongs to one session: ignore
+				// anything that does not carry the bridge's own id, otherwise a
+				// subagent's session_shutdown would push an "omp 已退出" card and
+				// dispose the live stream mid-run. `session_start` is handled
+				// separately (before `ensure`, so a subagent start with a different
+				// cwd cannot dispose the main bridge); events without a session id
+				// (older hosts, test doubles) keep the pre-gate behavior.
+				const incomingId = name === "session_start" ? undefined : sessionIdOf(ctx);
+				if (incomingId && bridge?.sessionId && incomingId !== bridge.sessionId) {
+					bridge.log.debug(`忽略来自其他会话（子代理）的 ${name} 事件`);
+					return undefined;
+				}
 				return await handler(event, ctx);
 			} catch (error) {
 				(bridge?.log ?? createLogger(undefined)).error(`事件 ${name} 处理失败`, error);
@@ -765,7 +800,17 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	pi.on(
 		"session_start",
 		safe("session_start", async (_event, ctx) => {
+			const incomingId = sessionIdOf(ctx);
+			if (incomingId && bridge?.sessionId && incomingId !== bridge.sessionId) {
+				// Subagent session_start: its own runner shares this in-process
+				// module. Skip BEFORE `ensure`, so a subagent start in a different
+				// cwd cannot dispose the main bridge (which would silently drop the
+				// takeover and the live stream).
+				bridge.log.debug(`忽略子代理会话的 session_start（${incomingId}）`);
+				return;
+			}
 			const b = ensure(ctx?.cwd ?? process.cwd());
+			if (incomingId) b.sessionId = incomingId;
 			b.ctx = ctx;
 			b.refreshConfig();
 			b.runStartedAt = Date.now();
@@ -779,9 +824,11 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 
 			for (const warning of b.warnings) b.log.warn(warning);
 
-			// Inbound control is opt-in and does not survive into a new session:
-			// only `control.autoTakeover` opens the channel by itself, otherwise
-			// the session waits for an explicit `/dingtalk takeover`.
+			// Inbound control is opt-in: only `control.autoTakeover` opens the
+			// channel by itself, otherwise the session waits for an explicit
+			// `/dingtalk takeover`. A takeover the user asked for is kept across
+			// session starts (autoTakeover=false must not silently drop it); the
+			// lock still arbitrates who actually holds the channel.
 			if (b.cfg.control.autoTakeover) {
 				const result = b.takeOver();
 				if (!result.ok) {
@@ -798,8 +845,11 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					);
 				}
 			} else if (b.takenOver) {
-				b.release();
-				b.log.info("新会话不再继承钉钉接管（control.autoTakeover = false）");
+				// Keep it. `control.autoTakeover = false` only means a new session must
+				// not grab the channel by itself; it must not silently drop a takeover
+				// the user asked for with `/dingtalk takeover`. Only an explicit
+				// takeover elsewhere (later wins) or `/dingtalk release` changes holders.
+				b.log.info("沿用已有钉钉接管（control.autoTakeover = false 既不自动接管、也不自动释放）");
 			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
 				b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
 			}

@@ -162,7 +162,8 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 | 通知发到了群里（想要私聊） | `outbound.mode` 没改成 `direct`。自定义机器人只能发群 |
 | 群里 @ 机器人没反应 | 默认 `scope: "direct"` 就是不理群聊。要群聊得改 `group`/`all` |
 | 钉钉发消息没反应 | ① `stream.enabled` 是否 true ② 有没有 `/dingtalk takeover` ③ 群聊是否 @ 了 ④ 应用有没有**发布** ⑤ `bun run watch` 发一条看帧 |
-| 每个新会话都要重新 takeover | 设计如此（`autoTakeover: false`）。要自动就改 `true` |
+| 每个新会话都要重新 takeover | 旧版本的「接管不跨会话继承」已废弃。接管现在是显式状态：`/dingtalk takeover` 后跨会话保留，新会话启动不会松开，只有被别的会话抢占或 `/dingtalk release` 才解除 |
+| 子代理退出时收到「omp 已退出」 | 已修复。子代理（共享同一进程模块、session id 不同）的 `session_start`/`session_shutdown` 会按会话 id 被忽略，不推退出卡、不拆主会话的桥。若再出现，先确认跑的是新版插件 |
 | 收到"钉钉接管已被抢占" | 另一个会话在同一钉钉应用上 takeover 了。想抢回就在本会话再 takeover |
 | 命令回复延迟几秒 | 正常，出站限流最短间隔 2.2 秒 |
 | 改了配置没生效 | 配置会话启动时重载，开新会话。`/dingtalk status` 会列实际生效的来源 |
