@@ -103,7 +103,17 @@ class Bridge {
 	 * `/dingtalk takeover`. Being connected is a deliberate state, not a default.
 	 */
 	takenOver = false;
-	sessionStartedAt = Date.now();
+	/**
+	 * When the current run started — the user prompt (or session start) up to the
+	 * moment the agent goes idle again.
+	 *
+	 * Reset at `session_start` and at the first `turn_start` after a
+	 * `session_stop`, so the idle card reports this run's duration instead of the
+	 * whole session's (a long-lived TUI session would otherwise show hours).
+	 */
+	runStartedAt = Date.now();
+	/** True between a `session_stop` and the first `turn_start` of the next run. */
+	awaitingRun = false;
 	turnCount = 0;
 	turnStartedAt = new Map<number, number>();
 	ctx: CtxLike | undefined;
@@ -758,7 +768,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
 			b.refreshConfig();
-			b.sessionStartedAt = Date.now();
+			b.runStartedAt = Date.now();
+			b.awaitingRun = false;
 			b.turnCount = 0;
 			b.turnStartedAt.clear();
 			b.restoreState(ctx);
@@ -804,6 +815,12 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		safe("turn_start", async (event, ctx) => {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
+			// A turn after a stop is the first turn of a new run: the previous idle
+			// card already reported its duration, so restart the clock here.
+			if (b.awaitingRun) {
+				b.runStartedAt = Date.now();
+				b.awaitingRun = false;
+			}
 			b.turnStartedAt.set(Number(event?.turnIndex ?? 0), Date.now());
 		}),
 	);
@@ -816,7 +833,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			b.setLastAssistant(event?.message);
 
 			const turnIndex = Number(event?.turnIndex ?? 0);
-			const startedAt = b.turnStartedAt.get(turnIndex) ?? b.sessionStartedAt;
+			const startedAt = b.turnStartedAt.get(turnIndex) ?? b.runStartedAt;
 			b.turnStartedAt.delete(turnIndex);
 			const durationMs = Date.now() - startedAt;
 
@@ -844,6 +861,10 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
 			b.turnCount += 1;
+			// This run is over: report how long it took (not the whole session) and
+			// let the next `turn_start` restart the clock.
+			const runDurationMs = Date.now() - b.runStartedAt;
+			b.awaitingRun = true;
 			if (event?.last_assistant_message) b.setLastAssistant(event.last_assistant_message);
 
 			// React to the message that drove this run: ✅ on a clean finish, ❌
@@ -858,7 +879,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			if (!b.cfg.notify.sessionStop) return;
 			b.notify(
 				fmtSessionStop({
-					durationMs: Date.now() - b.sessionStartedAt,
+					durationMs: runDurationMs,
 					turns: b.turnCount,
 					text: b.lastAssistantText,
 				}),

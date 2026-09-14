@@ -818,6 +818,22 @@ console.log("\n[12] 会话事件 → 通知");
 	const okAgainBefore = reactions("✅").length;
 	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 4, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "恢复了" }] }, session_id: "s1", stop_hook_active: false });
 	check("❌ 标志用后重置，下次回到 ✅", await waitFor(() => reactions("✅").length > okAgainBefore), reactions("✅").length);
+
+	// The idle card must report THIS run's duration, not the whole session's: a
+	// long-lived TUI session would otherwise show hours on every run. Gap out a
+	// little so a whole-session duration would be unmistakably large, then start a
+	// fresh run (turn_start after a stop) that finishes at once.
+	const parseMs = (text: string) => {
+		const m = text.match(/- \*\*耗时\*\*: (\d+(?:\.\d+)?)(ms|s)\b/);
+		return m ? Number(m[1]) * (m[2] === "s" ? 1000 : 1) : -1;
+	};
+	await tick(400);
+	await fire("turn_start", { type: "turn_start", turnIndex: 0 });
+	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 5, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "短跑证据" }] }, session_id: "s1", stop_hook_active: false });
+	const ranAgain = await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.text ?? "").includes("短跑证据")));
+	const runCard = ranAgain ? [...webhookPosts()].reverse().find((r) => String(r.body?.markdown?.text ?? "").includes("短跑证据")) : undefined;
+	const runMs = parseMs(String(runCard?.body?.markdown?.text ?? ""));
+	check("空闲卡报的是本轮耗时，不是整个会话", runMs >= 0 && runMs < 200, runMs);
 }
 
 console.log("\n[13] dingtalk_notify 工具");
