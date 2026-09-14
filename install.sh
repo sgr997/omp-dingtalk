@@ -14,6 +14,14 @@ ARCHIVE_URL="https://github.com/${REPO}/releases/download/${VERSION}/omp-dingtal
 
 echo "==> Installing omp-dingtalk ${VERSION} to ${INSTALL_DIR}"
 
+# Refuse to wipe a source checkout — install.sh is for fresh Release installs.
+if [ -d "${INSTALL_DIR}/.git" ]; then
+	echo "Error: ${INSTALL_DIR} is a git working copy." >&2
+	echo "       install.sh replaces that directory wholesale. On a source copy use:" >&2
+	echo "         omp plugin link ${INSTALL_DIR}   # or: git pull" >&2
+	exit 1
+fi
+
 # Ensure install directory exists and is empty
 rm -rf "${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
@@ -43,8 +51,10 @@ CONFIG_DIR="${OMP_CONFIG_DIR:-$HOME/.omp}"
 if [ ! -f "${CONFIG_DIR}/dingtalk.json" ]; then
 	mkdir -p "${CONFIG_DIR}"
 	cp "${INSTALL_DIR}/config.example.json" "${CONFIG_DIR}/dingtalk.json"
-	echo "==> Created ${CONFIG_DIR}/dingtalk.json from example"
-	echo "    Edit it to fill in your credentials."
+	chmod 600 "${CONFIG_DIR}/dingtalk.json"
+	echo "==> Created ${CONFIG_DIR}/dingtalk.json from example (mode 600)"
+	echo "    webhook.url and the stream credentials are empty — fill in yours,"
+	echo "    then run doctor to see what is still missing."
 else
 	echo "==> ${CONFIG_DIR}/dingtalk.json already exists — not overwriting"
 fi

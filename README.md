@@ -41,7 +41,7 @@
 | 自定义关键词 | 设一个词，比如 `omp` | `webhook.keyword`（插件会自动带上） |
 | IP 白名单 | 填公司出口 IP | 无需额外配置 |
 
-拿到 Webhook 地址（形如 `https://oapi.dingtalk.com/robot/send?access_token=xxx`），填进 `webhook.url`。
+拿到 Webhook 地址（形如 `https://oapi.dingtalk.com/robot/send?access_token=xxx`），填进 `webhook.url`。样例配置里这一项默认留空——留空即未配置，`doctor` 会直接告诉你缺什么，不会假装能发。
 
 > ⚠️ 自定义机器人有 **20 条/分钟** 的硬限制，超了会被封 10 分钟。插件已经内置保守限流（15 条/分钟、最短间隔 2.2 秒）和同 key 合并，正常使用不会触发。
 
@@ -455,7 +455,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 200 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、子代理（共享同一进程模块、带不同 session id 的会话）的 `session_start`/`session_shutdown` 一律忽略——既不推「omp 已退出」也不拆主会话的桥。
+- `test/smoke.ts` — 205 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 并发出告警、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、子代理（共享同一进程模块、带不同 session id 的会话）的 `session_start`/`session_shutdown` 一律忽略——既不推「omp 已退出」也不拆主会话的桥。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -512,7 +512,9 @@ wget -qO- https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/instal
 1. 下载最新 Release 的 `omp-dingtalk-0.1.0.tar.gz`
 2. 解压到 `~/.local/share/omp-dingtalk`
 3. 执行 `omp plugin link`
-4. 如果 `~/.omp/dingtalk.json` 不存在，从样例复制一份并提示你编辑
+4. 如果 `~/.omp/dingtalk.json` 不存在，从样例复制一份（`chmod 600`，因为要放密钥）并提示你编辑；**已存在的配置不会覆盖**。样例里的 `webhook.url` 和 stream 凭据都是空的，开箱状态就是「未配置」
+
+> ⚠️ `install.sh` 面向全新安装，会先 `rm -rf` 目标目录。**别在源码工作副本上跑它**——默认目标 `~/.local/share/omp-dingtalk` 恰好就是源码目录时，它会把整份代码删掉。源码副本请用 `omp plugin link` 或 `git pull` 更新。脚本检测到目标目录是 git 工作副本时会直接拒绝执行。
 
 装完跑验证：
 
@@ -529,7 +531,7 @@ cd ~/.local/share/omp-dingtalk && bun run doctor
    ```
 2. 解压到任意目录，比如 `~/tools/omp-dingtalk`
 3. `omp plugin link ~/tools/omp-dingtalk`
-4. `mkdir -p ~/.omp && cp ~/tools/omp-dingtalk/config.example.json ~/.omp/dingtalk.json`，然后填凭据
+4. `mkdir -p ~/.omp && cp ~/tools/omp-dingtalk/config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json`，然后填凭据（样例里 `webhook.url` 与 stream 凭据都是空的，`doctor` 会提示还缺什么）
 5. `cd ~/tools/omp-dingtalk && bun run doctor`
 
 （Windows 普通用户建不了符号链接时，按第 2 节的 junction 办法处理。）

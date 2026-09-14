@@ -87,8 +87,10 @@ omp plugin list
 
 复制样例到用户级配置再填：
 ```bash
-cp config.example.json ~/.omp/dingtalk.json
+cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 ```
+
+样例里 `webhook.url` 与 stream 凭据都是**空的**，开箱状态就是「未配置」——`chmod 600` 是因为文件里要放密钥；`doctor` 会列出还缺什么，不会出现一个看着像已配置的假地址。
 
 配置查找顺序（后者覆盖前者）：内置默认 → `~/.omp/agent/dingtalk.json` → `~/.omp/dingtalk.json` → `<项目>/.omp/dingtalk.json` → 环境变量。改完**开新会话生效**，不用重启。
 

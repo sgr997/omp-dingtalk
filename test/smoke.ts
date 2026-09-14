@@ -1535,6 +1535,25 @@ console.log("\n[28] 子代理会话的事件被忽略（不推送退出、不拆
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
+console.log("\n[29] 样例配置的开箱状态（防止占位值被当成已配置）");
+{
+	// A non-empty placeholder URL would flip `sender.configured` to true while
+	// every push goes to a fake endpoint — the nastiest kind of "looks fine".
+	const example = JSON.parse(readFileSync(new URL("../config.example.json", import.meta.url), "utf8"));
+	check("样例的 webhook.url 为空（不预置占位地址）", example.webhook.url === "", example.webhook.url);
+	check("样例的 outbound.mode 是合法值", ["webhook", "direct", "both"].includes(example.outbound.mode), example.outbound.mode);
+	check("样例的 control.allowUserId 是字符串（单值白名单）", typeof example.control.allowUserId === "string", typeof example.control.allowUserId);
+	const legacyExampleKeys = ["allowUserIds", "directUserIds", "learnFromInbound"].filter(
+		(key) => key in (example.control ?? {}) || key in (example.outbound ?? {}),
+	);
+	check("样例不含已废弃的旧字段", legacyExampleKeys.length === 0, legacyExampleKeys);
+	check(
+		"样例的 stream 凭据为空（开箱即未配置）",
+		!example.stream.clientId && !example.stream.clientSecret && !example.stream.robotCode,
+		example.stream,
+	);
+}
+
 // --- summary ----------------------------------------------------------------
 console.log(`\n${"=".repeat(56)}`);
 if (failures.length === 0) {
