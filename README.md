@@ -160,7 +160,7 @@ extensions:
 编辑源码后新会话会自动重载（加载器带 mtime 缓存失效）。
 </details>
 
-卸载：`omp plugin uninstall omp-dingtalk`。
+卸载：`omp plugin uninstall omp-dingtalk`（只清注册）。⚠️ 按安装方式补一步：**link/软链安装**（`omp plugin link`）卸载后 `~/.omp/plugins/node_modules/omp-dingtalk` 的软链会残留，要彻底干净再 `rm ~/.omp/plugins/node_modules/omp-dingtalk`（只删软链，源码目录不动）；npm 安装卸载的是真实包目录，无此残留。重装：`omp plugin link <仓库绝对路径>`，随后 `omp plugin doctor` 应全绿、`omp plugin list` 能看到 `omp-dingtalk@0.1.0`。
 
 ---
 
