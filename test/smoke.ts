@@ -1353,6 +1353,9 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
 	check("接管后通知恢复", await waitFor(() => groupPosts().length > afterTest), groupPosts().length - afterTest);
 
+	// 先让排队中的卡片落地，再取基准：接管卡与空闲卡走的是限速队列，
+	// 取早一步就会把「还没发出去」算成「release 之后又推送了」。
+	await tick(250);
 	const afterTaken = groupPosts().length;
 	await localCommands.get("dingtalk").handler("release", localCtx);
 	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
@@ -1516,19 +1519,11 @@ console.log("\n[26] 多会话抢占：新会话 takeover 覆盖旧会话");
 	// A must stand down by itself — otherwise both Streams stay live and DingTalk
 	// picks a winner at random.
 	check("A 在心跳周期内自动让位（关闭 Stream）", await waitFor(() => socketAlpha.readyState === 3, 4_000), socketAlpha.readyState);
+	// DingTalk has exactly one voice: the session that owns the channel. The
+	// session that just lost the takeover must push nothing — the winner's card
+	// already named it, and the demoted session keeps its warning in the log.
 	const noticeTitles = groupPosts().map((r) => String(r.body?.markdown?.title ?? ""));
-	check("A 发出了「接管已被抢占」通知", noticeTitles.some((t) => t.includes("已被抢占")), noticeTitles);
-	const preemptionTexts = groupPosts()
-		.filter((r) => String(r.body?.markdown?.title ?? "").includes("已被抢占"))
-		.map((r) => String(r.body?.markdown?.text ?? ""));
-	// A's own notice, not any other section's: the text names the victim's dir.
-	const noticeText = preemptionTexts.find((t) => t.includes("alpha")) ?? "";
-	check("这条通知绕过了「接管前静默」", noticeText.length > 0, preemptionTexts.length);
-	check(
-		"通知点名了抢走的一方和本会话，用户知道发生了什么",
-		noticeText.includes("beta") && noticeText.includes("alpha") && noticeText.includes("已自动释放"),
-		noticeText,
-	);
+	check("被抢占的会话不推「已被抢占」卡（钉钉只有一个出口）", !noticeTitles.some((t) => t.includes("已被抢占")), noticeTitles);
 
 	// Letting go late must not clobber the new owner.
 	const betaLock = lockFor("beta");
@@ -1760,6 +1755,12 @@ console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知
 		.execute("call-bystander", { title: "t", message: "m", urgency: "normal" }, undefined, undefined, beta.ctx);
 	check("B 的 dingtalk_notify 同样被挡住", blocked?.isError === true, blocked?.details);
 	check("挡住原因点名了「另一个 omp 会话」", String(blocked?.content?.[0]?.text ?? "").includes("另一个 omp 会话"), blocked?.content?.[0]?.text);
+
+	const testBaseline = groupPosts().length;
+	await beta.cmds.get("dingtalk").handler("test", beta.ctx);
+	await tick(150);
+	check("B 的 /dingtalk test 也不往钉钉发", groupPosts().length === testBaseline, groupPosts().length - testBaseline);
+	check("B 的 /dingtalk test 在终端说明了原因", String(beta.notes.at(-1) ?? "").includes("另一个 omp 会话"), beta.notes.at(-1));
 
 	const ownerBaseline = groupPosts().length;
 	await alpha.h.get("session_stop")![0](stopEvent, alpha.ctx);

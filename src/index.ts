@@ -564,22 +564,12 @@ class Bridge {
 		const preemptedBy = lock.heartbeat();
 		if (!preemptedBy) return;
 
-		this.log.warn(`接管已被另一个会话抢占：${preemptedBy.cwd} (PID ${preemptedBy.pid})`);
-		const victim = this.cwd;
+		// DingTalk has exactly one voice: whoever owns the channel. A session
+		// that just lost the takeover is a bystander now — the winner's card
+		// already named it, so push nothing; the warning stays in this session's
+		// terminal log.
+		this.log.warn(`接管已被另一个会话抢占：${preemptedBy.cwd} (PID ${preemptedBy.pid})，本会话不再推送钉钉消息`);
 		this.release();
-		this.notify(
-			fmtText(
-				"⚠️ 钉钉接管已被抢占",
-				[
-					`另一个会话（目录 \`${truncatePath(preemptedBy.cwd, 120)}\`，PID ${preemptedBy.pid}）接管了同一个钉钉应用。`,
-					``,
-					`本会话（\`${truncatePath(victim, 120)}\`）已自动释放，**钉钉里的消息不会再到达这里**。`,
-					``,
-					`想抢回来就在这个会话里重新执行 \`/dingtalk takeover\`。`,
-				].join("\n"),
-			),
-			{ priority: "high", bypassQuiet: true, bypassTakeover: true },
-		);
 	}
 
 	/**
@@ -1300,6 +1290,16 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					if (!b.sender.configured) {
 						ctx.ui?.notify?.(
 							`当前没有可用的出站通道（outbound.mode = ${b.cfg.outbound.mode}），无法发送测试消息。`,
+							"error",
+						);
+						return;
+					}
+					// 静默期（notify.onlyWhenTakenOver）是允许手动测试的——否则没法确认
+					// 出站通道通不通。只有钉钉已经被别的会话接管时才拒绝：那时这条消息
+					// 会被算到别人头上。
+					if (b.channelHeldByOther) {
+						ctx.ui?.notify?.(
+							"测试消息未发送：钉钉通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 /dingtalk takeover。",
 							"error",
 						);
 						return;
