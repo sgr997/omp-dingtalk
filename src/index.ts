@@ -566,8 +566,7 @@ class Bridge {
 
 		// DingTalk has exactly one voice: whoever owns the channel. A session
 		// that just lost the takeover is a bystander now — the winner's card
-		// already named it, so push nothing; the warning stays in this session's
-		// terminal log.
+		// already named it, so push nothing; the warning stays in this log.
 		this.log.warn(`接管已被另一个会话抢占：${preemptedBy.cwd} (PID ${preemptedBy.pid})，本会话不再推送钉钉消息`);
 		this.release();
 	}
