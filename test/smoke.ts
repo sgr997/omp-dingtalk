@@ -1688,6 +1688,91 @@ console.log("\n[30] 子代理在独立 cwd 里绑定自己的副本时保持静�
 	check("主会话绑定的重试照常推送", webhookPosts().length > postsBefore, webhookPosts().length - postsBefore);
 }
 
+console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知");
+{
+	// The real-world setup: window A takes over, window B is an ordinary
+	// session. With notify.onlyWhenTakenOver = false, B used to push its own
+	// "omp 空闲" card into the same DingTalk account A controls. A takeover
+	// must claim the outbound side too, or the user cannot tell which window
+	// is talking to them.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-bystander-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=BYSTANDERTOKEN", secret: "" },
+			stream: { enabled: true, clientId: "bystander-client", clientSecret: "bystander-secret", robotCode: "ding-bystander" },
+			// Deliberately false: the point is that the takeover itself silences
+			// the other session, not this switch.
+			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+
+	/** Boot an independent module instance — i.e. a second omp window. */
+	const boot = async (tag: string) => {
+		const module = await import(`../src/index.ts?bystander=${tag}`);
+		const h = new Map<string, Handler[]>();
+		const cmds = new Map<string, any>();
+		const localTools = new Map<string, any>();
+		const notes: string[] = [];
+		const localPi: any = {
+			...pi,
+			on: (event: string, handler: Handler) => h.set(event, [...(h.get(event) ?? []), handler]),
+			registerCommand: (name: string, options: any) => cmds.set(name, options),
+			registerTool: (definition: any) => localTools.set(definition.name, definition),
+		};
+		module.default(localPi);
+		const localCtx: any = { ...ctx, cwd: join(base, tag), ui: { notify: (message: string) => notes.push(message) } };
+		await tick(120);
+		await h.get("session_start")![0]({ type: "session_start" }, localCtx);
+		return { h, cmds, tools: localTools, notes, ctx: localCtx };
+	};
+
+	const alpha = await boot("alpha");
+	const beta = await boot("beta");
+
+	const stopEvent = {
+		type: "session_stop",
+		last_assistant_message: { role: "assistant", content: [{ type: "text", text: "干完了" }] },
+	};
+	const turnEvent = { type: "turn_end", turnIndex: 0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } };
+
+	// Nobody owns the channel yet: B is an ordinary notifier.
+	const beforeTakeover = groupPosts().length;
+	await beta.h.get("turn_end")![0](turnEvent, beta.ctx);
+	check("没人接管时 B 照常推送（旁观判定不误伤）", await waitFor(() => groupPosts().length > beforeTakeover), groupPosts().length - beforeTakeover);
+
+	await alpha.cmds.get("dingtalk").handler("takeover", alpha.ctx);
+	check("A 接管成功", String(alpha.notes.at(-1) ?? "").includes("钉钉已接管本会话"), alpha.notes.at(-1));
+	await tick(150);
+
+	const baseline = groupPosts().length;
+	await beta.h.get("turn_end")![0](turnEvent, beta.ctx);
+	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
+	await tick(250);
+	check("A 接管后，B 的轮次与空闲通知一律不推", groupPosts().length === baseline, groupPosts().length - baseline);
+
+	const blocked = await beta.tools
+		.get("dingtalk_notify")
+		.execute("call-bystander", { title: "t", message: "m", urgency: "normal" }, undefined, undefined, beta.ctx);
+	check("B 的 dingtalk_notify 同样被挡住", blocked?.isError === true, blocked?.details);
+	check("挡住原因点名了「另一个 omp 会话」", String(blocked?.content?.[0]?.text ?? "").includes("另一个 omp 会话"), blocked?.content?.[0]?.text);
+
+	const ownerBaseline = groupPosts().length;
+	await alpha.h.get("session_stop")![0](stopEvent, alpha.ctx);
+	check("接管方 A 照常推送", await waitFor(() => groupPosts().length > ownerBaseline), groupPosts().length - ownerBaseline);
+
+	await alpha.cmds.get("dingtalk").handler("release", alpha.ctx);
+	const afterRelease = groupPosts().length;
+	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
+	check("A 释放后 B 恢复推送（通道没人占）", await waitFor(() => groupPosts().length > afterRelease), groupPosts().length - afterRelease);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
 // --- summary ----------------------------------------------------------------
 console.log(`\n${"=".repeat(56)}`);
 if (failures.length === 0) {

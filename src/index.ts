@@ -228,6 +228,13 @@ class Bridge {
 			this.log.debug("配置为接管前静默，跳过通知", { title: message.title });
 			return;
 		}
+		// A takeover held by another live session makes this one a bystander:
+		// the DingTalk account already has an owner, and two sessions pushing
+		// into the same conversation is noise the user cannot attribute.
+		if (!options.bypassTakeover && this.channelHeldByOther) {
+			this.log.debug("另一个会话正接管钉钉通道，本会话不发通知", { title: message.title });
+			return;
+		}
 		if (this.quiet && !options.bypassQuiet) return;
 		if (!this.sender.configured) {
 			this.log.debug("没有可用的出站通道，跳过通知", { title: message.title });
@@ -245,6 +252,7 @@ class Bridge {
 	get canPush(): boolean {
 		if (!this.cfg.enabled) return false;
 		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) return false;
+		if (this.channelHeldByOther) return false;
 		return this.sender.configured;
 	}
 
@@ -254,10 +262,36 @@ class Bridge {
 		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) {
 			return "配置为「接管前静默」（notify.onlyWhenTakenOver），需要先在 omp 里执行 `/dingtalk takeover`。";
 		}
+		if (this.channelHeldByOther) {
+			return "钉钉通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 `/dingtalk takeover`。";
+		}
 		if (!this.sender.configured) {
 			return `当前没有可用的出站通道（outbound.mode = ${this.cfg.outbound.mode}）。`;
 		}
 		return undefined;
+	}
+
+	/**
+	 * The lock for this app's credential, for *reading* even before a takeover.
+	 *
+	 * `#ensureLock()` only runs when this session takes over, so a session that
+	 * never took over has no lock instance — and that is exactly the session
+	 * that has to notice someone else owns the channel. Constructing a lock
+	 * reads nothing and claims nothing: it just computes the file path.
+	 */
+	#lockForRead(): TakeoverLock {
+		return this.lock ?? new TakeoverLock(this.cfg.stream.clientId, this.log);
+	}
+
+	/** Another live session holds this app's channel; this session is a bystander. */
+	get channelHeldByOther(): boolean {
+		return this.#lockForRead().heldByOther();
+	}
+
+	/** The other session currently holding this app's channel, if any. */
+	get channelOwner(): LockHolder | undefined {
+		const lock = this.#lockForRead();
+		return lock.heldByOther() ? lock.readOwner() : undefined;
 	}
 
 	/**
@@ -907,7 +941,16 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				// takeover elsewhere (later wins) or `/dingtalk release` changes holders.
 				b.log.info("沿用已有钉钉接管（control.autoTakeover = false 既不自动接管、也不自动释放）");
 			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
-				b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
+				// Name the other owner explicitly: plain "未接管" reads as "nobody
+				// controls the account", when in fact another session does.
+				const owner = b.channelOwner;
+				if (owner) {
+					b.log.info(
+						`钉钉通道已由另一个会话接管（PID ${owner.pid}，目录 ${owner.cwd || "?"}），本会话静默、不推送通知；需要接手就执行 /dingtalk takeover`,
+					);
+				} else {
+					b.log.info("钉钉未接管本会话（默认）。需要远程控制时执行 /dingtalk takeover");
+				}
 			}
 			// No startup notification on purpose: a launch is ordinary, and a
 			// DingTalk ping for every new session is noise. Takeover — whether

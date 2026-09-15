@@ -130,6 +130,22 @@ export class TakeoverLock {
 	}
 
 	/**
+	 * Whether a *different* live session currently holds the channel.
+	 *
+	 * A session that is not the holder is a bystander: pushing notifications
+	 * into a conversation another session controls would give the user two
+	 * interleaved streams of cards from one DingTalk account. A dead or stale
+	 * holder does not count — with nobody heartbeating, the channel is free.
+	 */
+	heldByOther(): boolean {
+		const owner = this.readOwner();
+		if (!owner) return false;
+		if (this.#held && owner.token === this.#token) return false;
+		if (!isAlive(owner.pid)) return false;
+		return Date.now() - (owner.heartbeatAt || 0) <= STALE_MS;
+	}
+
+	/**
 	 * Take the lock, displacing any other holder. Never fails on contention —
 	 * that is the point of the preemptive design.
 	 */
