@@ -814,6 +814,21 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	};
 
 	/**
+	 * Whether `ctx` is an interactive top-level session — the kind a human drives
+	 * in the TUI — as opposed to a nested subagent.
+	 *
+	 * A session id alone cannot tell the two apart: handlers live in one
+	 * process-wide list, and both a subagent's runner and a second top-level
+	 * session dispatch through it carrying an id other than the bridge's own.
+	 * What does differ is how the runner was initialized. The TUI session is
+	 * initialized with a UI context and mode `"tui"`; a subagent's runner is
+	 * initialized with neither, so it reports `hasUI: false` and
+	 * `mode: "print"`. That structural difference is the discriminator an
+	 * extension can actually rely on.
+	 */
+	const isInteractiveSession = (ctx: any): boolean => ctx?.hasUI === true || ctx?.mode === "tui";
+
+	/**
 	 * Process-wide ownership: may this factory invocation act on `ctx`?
 	 *
 	 * The host rebinds this factory once per session, so a subagent's events
@@ -881,12 +896,29 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		safe("session_start", async (_event, ctx) => {
 			const incomingId = sessionIdOf(ctx);
 			if (incomingId && bridge?.sessionId && incomingId !== bridge.sessionId) {
-				// Subagent session_start: its own runner shares this in-process
-				// module. Skip BEFORE `ensure`, so a subagent start in a different
-				// cwd cannot dispose the main bridge (which would silently drop the
-				// takeover and the live stream).
-				bridge.log.debug(`忽略子代理会话的 session_start（${incomingId}）`);
-				return;
+				// A second session id in this process means one of three things:
+				//   - a subagent (headless runner): stay silent, so its retries,
+				//     turn ends and "omp 已退出" never reach DingTalk;
+				//   - a new top-level session the user switched to: the bridge
+				//     must follow it, otherwise every event it emits is filtered
+				//     out as foreign and DingTalk goes quiet while the lock and
+				//     the stream still look healthy;
+				//   - a top-level session while another one holds the channel
+				//     from `/dingtalk takeover`: it stays a bystander.
+				if (!isInteractiveSession(ctx)) {
+					// Skip BEFORE `ensure`, so a subagent start in a different cwd
+					// cannot dispose the main bridge (which would silently drop the
+					// takeover and the live stream).
+					bridge.log.debug(`忽略子代理会话的 session_start（${incomingId}）`);
+					return;
+				}
+				if (bridge.takenOver) {
+					bridge.log.debug(
+						`忽略外来会话的 session_start（${incomingId}）：钉钉通道已由本进程的接管会话持有`,
+					);
+					return;
+				}
+				bridge.log.info(`会话切换：钉钉桥改随新会话（${incomingId}）`);
 			}
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			if (incomingId) b.sessionId = incomingId;
@@ -1265,6 +1297,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					// is worth a push — this is the only "handed over" signal the
 					// phone gets when the session was launched with autoTakeover off.
 					if (result.ok) {
+						// Bind the bridge to the session that just took over. In a
+						// process that hosted an earlier session the bridge still
+						// carries that session's id, and without this every event
+						// of THIS one would be filtered out as foreign — the
+						// takeover card goes out, then silence.
+						const id = sessionIdOf(ctx);
+						if (id) b.sessionId = id;
 						b.notify(
 							fmtTakeoverSuccess({
 								cwd: b.cwd,

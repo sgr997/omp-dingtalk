@@ -453,7 +453,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 221 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、子代理（共享同一进程模块、带不同 session id 的会话）的 `session_start`/`session_shutdown` 一律忽略——既不推「omp 已退出」也不拆主会话的桥；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。
+- `test/smoke.ts` — 223 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -464,6 +464,7 @@ bun run lint        # oxlint（0 警告）
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
 | 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
+| 接管成功、锁和 Stream 都正常，却一条都不推 | 同一个 omp 进程里先跑过别的会话（切会话 / 新建 / 恢复），桥的归属还停在那一个 session 上，于是接管会话自己的事件被当成「外来会话」过滤掉了。已在插件侧修好：顶层会话切换时桥自动改随新会话，接管成功时也会重新绑定；子代理（无 UI 的 headless runner）依旧完全静默。旧版遇到这个现象：退出重开该 omp 会话，或在本会话再执行一次 `/dingtalk takeover` |
 | 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
 | 设了 `direct` 但单聊收不到通知 | ① `stream.robotCode` 是否填了（`ding` 开头）② `control.allowUserId` 是否为空（它同时是白名单和推送收件人） ③ 应用是否有**机器人发送消息**权限、收件人是否在应用可见范围内 ④ `/dingtalk status` 看「出站通道」和「单聊收件人」两行 |
 | 通知还是发到群里 | `outbound.mode` 是不是 `webhook` 或 `both`。自定义机器人**只能发群**，要私聊必须用 `direct` |

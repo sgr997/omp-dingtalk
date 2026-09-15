@@ -1586,7 +1586,14 @@ console.log("\n[28] 子代理会话的事件被忽略（不推送退出、不拆
 	module.default(localPi);
 
 	const mainCtx: any = { ...ctx, sessionManager: { getBranch: () => [], getSessionId: () => "session-main" } };
-	const subCtx: any = { ...ctx, sessionManager: { getBranch: () => [], getSessionId: () => "session-sub" } };
+	// A subagent's runner is initialized without a UI context, so it reports
+	// `hasUI: false` / `mode: "print"` — that is what marks a session as nested.
+	const subCtx: any = {
+		...ctx,
+		hasUI: false,
+		mode: "print",
+		sessionManager: { getBranch: () => [], getSessionId: () => "session-sub" },
+	};
 
 	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
 	const lockCount = () => readdirSync(lockRoot).filter((f) => f.includes("takeover")).length;
@@ -1663,7 +1670,7 @@ console.log("\n[30] 子代理在独立 cwd 里绑定自己的副本时保持静�
 		sessionManager: { getBranch: () => [], getSessionId: () => id },
 	});
 	const mainCtx = sessionCtx("session-main", "/tmp/owner-main");
-	const subCtx = sessionCtx("session-sub", "/tmp/owner-sub");
+	const subCtx = { ...sessionCtx("session-sub", "/tmp/owner-sub"), hasUI: false, mode: "print" };
 	const retry = () => ({ type: "auto_retry_start", attempt: 4, maxAttempts: 10, delayMs: 3_000, errorMessage: "boom" });
 
 	await mainHandlers.get("session_start")![0]({ type: "session_start" }, mainCtx);
@@ -1770,6 +1777,69 @@ console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知
 	const afterRelease = groupPosts().length;
 	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
 	check("A 释放后 B 恢复推送（通道没人占）", await waitFor(() => groupPosts().length > afterRelease), groupPosts().length - afterRelease);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[32] 同进程第二个顶层会话：接管后事件不再被当成子代理丢弃");
+{
+	// Handlers live in one process-wide list, so a second top-level session in
+	// the same process dispatches through the same handlers with a different
+	// session id — which is exactly what a subagent looks like by id alone. It
+	// used to be treated as a subagent and every event dropped: takeover
+	// succeeded, the stream was live, and DingTalk stayed silent. The
+	// discriminator is the runner: a subagent is headless (`hasUI: false`,
+	// `mode: "print"`), the TUI session is not.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-multisession-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=MULTITOKEN", secret: "" },
+			stream: { enabled: false },
+			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+
+	const module = await import(`../src/index.ts?multisession=${Date.now()}`);
+	const h = new Map<string, Handler[]>();
+	const cmds = new Map<string, any>();
+	module.default({
+		...pi,
+		on: (e: string, handler: Handler) => h.set(e, [...(h.get(e) ?? []), handler]),
+		registerCommand: (n: string, o: any) => cmds.set(n, o),
+	});
+
+	const ctxOf = (id: string, extra: Record<string, unknown> = {}) => ({
+		...ctx,
+		cwd: base,
+		sessionManager: { getBranch: () => [], getSessionId: () => id },
+		...extra,
+	});
+	const first = ctxOf("session-1");
+	const second = ctxOf("session-2");
+	const sub = ctxOf("session-sub", { hasUI: false, mode: "print" });
+	const turnEnd = { type: "turn_end", turnIndex: 0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } };
+
+	await h.get("session_start")![0]({ type: "session_start" }, first);
+	await tick(150);
+	// The user opens another top-level session in the same process and takes
+	// over there. Its events must no longer be filtered out as a subagent's.
+	await h.get("session_start")![0]({ type: "session_start" }, second);
+	await cmds.get("dingtalk").handler("takeover", second);
+	const before = webhookPosts().length;
+	await h.get("turn_end")![0](turnEnd, second);
+	check("第二个顶层会话接管后，轮次通知能推出去", await waitFor(() => webhookPosts().length > before), webhookPosts().length - before);
+
+	// A genuine subagent in the same process stays silent.
+	const subBaseline = webhookPosts().length;
+	await h.get("session_start")![0]({ type: "session_start" }, sub);
+	await h.get("turn_end")![0](turnEnd, sub);
+	await tick(150);
+	check("子代理的轮次仍然不推送", webhookPosts().length === subBaseline, webhookPosts().length - subBaseline);
 
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
