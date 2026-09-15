@@ -42,7 +42,7 @@
 
 **安全默认（agent 直接按这个引导，不要问）：**
 - `control.scope: "direct"` —— 只认单聊，群聊一律不理（防误触）。
-- `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通；已接管的会话不会因新会话启动而松开（接管是显式状态，只有被别的会话抢占或 `/dingtalk release` 才解除）。
+- `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通；已接管的会话不会因新会话启动而松开（接管是显式状态，只有被别的会话抢占或 `/dingtalk release` 才解除）。**接管同时认领出站**：一旦有会话接管，通知只从那个会话发（`notify.onlyWhenTakenOver: false` 也一样），别的会话静默，避免两个窗口的通知混进同一个钉钉。
 - `control.allowUserId` 必填，只填一个人 —— 他既是白名单（**留空 = 拒绝一切指令，fail-closed**），也是单聊推送的唯一收件人。引导用户用 `/id` 拿到 ID 后填入。
 - 通知走私聊优先 `direct`（不打扰群），但要有企业内部应用。
 
@@ -166,6 +166,7 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 | 群里 @ 机器人没反应 | 默认 `scope: "direct"` 就是不理群聊。要群聊得改 `group`/`all` |
 | 钉钉发消息没反应 | ① `stream.enabled` 是否 true ② 有没有 `/dingtalk takeover` ③ 群聊是否 @ 了 ④ 应用有没有**发布** ⑤ `bun run watch` 发一条看帧 |
 | 每个新会话都要重新 takeover | 旧版本的「接管不跨会话继承」已废弃。接管现在是显式状态：`/dingtalk takeover` 后跨会话保留，新会话启动不会松开，只有被别的会话抢占或 `/dingtalk release` 才解除 |
+| 开了两个窗口，B 也会推通知 | 接管同时认领**出站**：一旦有会话接管，通知只从那个会话来（`notify.onlyWhenTakenOver: false` 也一样）。想让 B 推，就在 B 里 `/dingtalk takeover`（会抢走 A）；想让 A 推，就确保接管在 A，B 里不要接管 |
 | 子代理退出/重试被推送、退出去还像主会话退出 | 已修复。宿主按会话重建扩展工厂：主会话一份插件副本，子代理在**自己的 cwd** 里再绑一份，各自持有独立 `bridge`——只靠 session id 门控挡不住这类泄漏（那是同一副本内的比较）。现在归属是**进程级**的：第一个见到 session id 的绑定拥有插件，其余绑定（子代理）完全静默：不建桥、不推送、不连 Stream。同一副本内带不同 session id 的事件仍按 id 忽略。若再出现，先确认跑的是新版插件（旧 omp 会话要退出重开才载入新代码） |
 | 收到"钉钉接管已被抢占" | 另一个会话在同一钉钉应用上 takeover 了。想抢回就在本会话再 takeover |
 | 命令回复延迟几秒 | 正常，出站限流最短间隔 2.2 秒 |
