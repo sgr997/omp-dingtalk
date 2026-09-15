@@ -484,6 +484,7 @@ class Bridge {
 			`- **通知队列**: ${stats.queued} 待发 / 已发 ${stats.delivered} / 丢弃 ${stats.dropped} / 失败 ${stats.failed}`,
 			`- **钉钉接管**: ${inbound}`,
 			lockLine,
+			this.sessionId ? `- **桥绑定会话**: ${this.sessionId}` : "- **桥绑定会话**: (未绑定)",
 			`- **入站通道**: ${this.streamStatus.state}${this.streamStatus.detail ? ` (${this.streamStatus.detail})` : ""} · 重连 ${this.streamStatus.reconnects} 次`,
 			`- **待审批**: ${pending}`,
 			`- **待回答提问**: ${this.questions.size}`,
@@ -823,10 +824,15 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	 * What does differ is how the runner was initialized. The TUI session is
 	 * initialized with a UI context and mode `"tui"`; a subagent's runner is
 	 * initialized with neither, so it reports `hasUI: false` and
-	 * `mode: "print"`. That structural difference is the discriminator an
-	 * extension can actually rely on.
+	 * `mode: "print"`. Both must hold: requiring only `hasUI === true` would
+	 * misclassify a future interactive subagent (one day a subagent could get
+	 * a UI context), and requiring only `mode === "tui"` would misclassify a
+	 * non-TUI host. Headless top-level sessions (`rpc`/`json`/`print`) are
+	 * indistinguishable from subagents by these fields, so they are NOT
+	 * re-homed here — the loss is made explicit in `safe()`/`/dingtalk status`
+	 * instead of silent.
 	 */
-	const isInteractiveSession = (ctx: any): boolean => ctx?.hasUI === true || ctx?.mode === "tui";
+	const isInteractiveSession = (ctx: any): boolean => ctx?.hasUI === true && ctx?.mode === "tui";
 
 	/**
 	 * Process-wide ownership: may this factory invocation act on `ctx`?
@@ -849,6 +855,15 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	const isForeignSession = (ctx: any, id = sessionIdOf(ctx)): boolean =>
 		Boolean(id && bridge?.sessionId && id !== bridge.sessionId);
 
+	/**
+	 * How many events have been dropped because they carried a session id
+	 * other than the bridge's. Most of these are routine subagent traffic and
+	 * should not pollute the log; `/dingtalk status` surfaces the count so a
+	 * headless top-level session being silently filtered is discoverable on
+	 * demand instead of hidden at debug level.
+	 */
+	let foreignDroppedEvents = 0;
+
 	/** Wrap a handler so nothing it does can escape into the host. */
 	const safe =
 		(name: string, handler: (event: any, ctx: any) => unknown) =>
@@ -864,7 +879,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				// main bridge).
 				const incomingId = name === "session_start" ? undefined : sessionIdOf(ctx);
 				if (incomingId && isForeignSession(ctx, incomingId)) {
-					bridge?.log.debug(`忽略来自其他会话（子代理）的 ${name} 事件`);
+					foreignDroppedEvents++;
+					bridge?.log.debug(`忽略来自会话 ${incomingId} 的 ${name} 事件（该会话不拥有钉钉通道）`);
 					return undefined;
 				}
 				return await handler(event, ctx);
@@ -904,21 +920,43 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				//     out as foreign and DingTalk goes quiet while the lock and
 				//     the stream still look healthy;
 				//   - a top-level session while another one holds the channel
-				//     from `/dingtalk takeover`: it stays a bystander.
+				//     from `/dingtalk takeover`: it stays a bystander unless
+				//     autoTakeover is on (then later wins).
 				if (!isInteractiveSession(ctx)) {
 					// Skip BEFORE `ensure`, so a subagent start in a different cwd
 					// cannot dispose the main bridge (which would silently drop the
-					// takeover and the live stream).
-					bridge.log.debug(`忽略子代理会话的 session_start（${incomingId}）`);
-					return;
-				}
-				if (bridge.takenOver) {
+					// takeover and the live stream). A headless top-level session
+					// (rpc/json/print) is indistinguishable from a subagent by the
+					// fields the host exposes, so it is not re-homed automatically
+					// either; it can still take the channel with an explicit
+					// /dingtalk takeover, and /dingtalk status shows the binding so
+					// the mismatch is not silent. Stays at debug: subagents are
+					// routine and a warn here would flood the log.
+					foreignDroppedEvents++;
 					bridge.log.debug(
-						`忽略外来会话的 session_start（${incomingId}）：钉钉通道已由本进程的接管会话持有`,
+						`忽略无 UI 会话的 session_start（${incomingId}）：子代理或 headless 顶层会话不参与钉钉`,
 					);
 					return;
 				}
-				bridge.log.info(`会话切换：钉钉桥改随新会话（${incomingId}）`);
+				if (bridge.takenOver) {
+					if (bridge.cfg.control.autoTakeover) {
+						// Later wins: with autoTakeover on the user expects the
+						// newest top-level session to hold the channel. Fall
+						// through, rebind the session id, and let the
+						// autoTakeover block below preempt the earlier session.
+						bridge.log.info(`会话切换（自动接管开启）：钉钉桥改随新会话（${incomingId}）`);
+					} else {
+						// Always a real, interactive session (we got past the
+						// check above), so warn once: the user opened a window
+						// that will stay silent until it takes over.
+						bridge.log.warn(
+							`忽略会话 ${incomingId} 的 session_start：钉钉通道已由本进程的接管会话持有。若此会话要接管，执行 /dingtalk takeover。`,
+						);
+						return;
+					}
+				} else {
+					bridge.log.info(`会话切换：钉钉桥改随新会话（${incomingId}）`);
+				}
 			}
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			if (incomingId) b.sessionId = incomingId;
@@ -1378,6 +1416,15 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					...b.statusLines(),
 					`- **审批规则**: ${b.cfg.approval.mode === "remote" ? `${(b.cfg.approval.rules.length ? b.cfg.approval.rules : DEFAULT_APPROVAL_RULES).length} 条` : "未启用"}`,
 				];
+				const curId = sessionIdOf(ctx);
+				if (b.sessionId && curId && b.sessionId !== curId) {
+					lines.push(
+						`- **⚠️ 会话归属不符**: 桥绑定在 \`${b.sessionId}\`，当前会话是 \`${curId}\`。若当前会话要接管，执行 /dingtalk takeover。`,
+					);
+				}
+				if (foreignDroppedEvents > 0) {
+					lines.push(`- **归属过滤**: 已丢弃 ${foreignDroppedEvents} 个来自外来会话的事件（多为子代理，属正常）`);
+				}
 				ctx.ui?.notify?.(lines.join("\n"), "info");
 			} catch (error) {
 				ctx?.ui?.notify?.(`/dingtalk 执行失败: ${error instanceof Error ? error.message : String(error)}`, "error");

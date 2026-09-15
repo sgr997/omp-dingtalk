@@ -257,6 +257,9 @@ const localAskCalls: Array<{ params: any; resolve: (result: any) => void; aborte
 const ctx: any = {
 	cwd: process.cwd(),
 	hasUI: true,
+	// The interactive TUI session the plugin expects: `hasUI` plus mode `tui`.
+	// A subagent's runner has neither (see the subCtx/session-start tests).
+	mode: "tui",
 	invokeTool: (params: any, options?: { signal?: AbortSignal }) =>
 		new Promise<any>((resolve, reject) => {
 			const record: any = { params, resolve, aborted: false };
@@ -1840,6 +1843,132 @@ console.log("\n[32] 同进程第二个顶层会话：接管后事件不再被当
 	await h.get("turn_end")![0](turnEnd, sub);
 	await tick(150);
 	check("子代理的轮次仍然不推送", webhookPosts().length === subBaseline, webhookPosts().length - subBaseline);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[33] autoTakeover=true：第二个顶层会话后来者覆盖，不再被当旁观者丢弃");
+{
+	// With control.autoTakeover = true, the newest top-level session is
+	// expected to hold the channel ("later wins"). A second session_start used
+	// to hit the takenOver guard and be dropped before the autoTakeover block
+	// ran, leaving that session a permanent bystander. Falling through rebinds
+	// the bridge to the new session and lets it preempt the earlier one.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-laterwins-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=LATERWINSTOKEN", secret: "" },
+			// Takeover opens the inbound stream; with it disabled, takeOver()
+			// fails and the "later wins" path below is never exercised.
+			stream: { enabled: true, clientId: "laterwins-client", clientSecret: "laterwins-secret", robotCode: "ding-laterwins" },
+			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+	const module = await import(`../src/index.ts?laterwins=${Date.now()}`);
+	const h = new Map<string, Handler[]>();
+	const cmds = new Map<string, any>();
+	const notes: string[] = [];
+	module.default({
+		...pi,
+		on: (e: string, handler: Handler) => h.set(e, [...(h.get(e) ?? []), handler]),
+		registerCommand: (n: string, o: any) => cmds.set(n, o),
+	});
+	const ctxOf = (id: string) => ({
+		...ctx,
+		cwd: base,
+		ui: { notify: (message: string) => notes.push(message) },
+		sessionManager: { getBranch: () => [], getSessionId: () => id },
+	});
+	const s1 = ctxOf("session-l1");
+	const s2 = ctxOf("session-l2");
+	const turnEnd = { type: "turn_end", turnIndex: 0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } };
+
+	await h.get("session_start")![0]({ type: "session_start" }, s1);
+	await tick(200);
+	// Prove the first session actually holds the channel — otherwise the
+	// "later wins" path is never exercised and this test would pass even
+	// against the buggy code.
+	notes.length = 0;
+	await cmds.get("dingtalk").handler("status", s1);
+	const s1Status = notes.at(-1) ?? "";
+	check("首个会话在 autoTakeover 下确实接管了", s1Status.includes("已接管"), s1Status);
+	const b1 = webhookPosts().length;
+	await h.get("turn_end")![0](turnEnd, s1);
+	check("autoTakeover 下首个会话接管，轮次能推送", await waitFor(() => webhookPosts().length > b1), webhookPosts().length - b1);
+
+	// Second top-level session arrives while the first still holds the lock.
+	await h.get("session_start")![0]({ type: "session_start" }, s2);
+	await tick(200);
+	const b2 = webhookPosts().length;
+	await h.get("turn_end")![0](turnEnd, s2);
+	check("autoTakeover 下第二个顶层会话的轮次能推送（后来者覆盖）", await waitFor(() => webhookPosts().length > b2), webhookPosts().length - b2);
+
+	// The superseded first session is now foreign: its events must not leak.
+	const b3 = webhookPosts().length;
+	await h.get("turn_end")![0](turnEnd, s1);
+	await tick(150);
+	check("被覆盖的旧会话轮次不再推送", webhookPosts().length === b3, webhookPosts().length - b3);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[34] /dingtalk status 在桥绑定会话与当前会话不符时给出显式提示");
+{
+	// The silent-drop failure was hard to diagnose because the discard lived
+	// at debug level. status must surface a binding that does not match the
+	// session it was asked from, plus the accumulated foreign-drop count.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-statusmismatch-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=STATUSMISMATCH", secret: "" },
+			stream: { enabled: false },
+			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+	const module = await import(`../src/index.ts?statusmismatch=${Date.now()}`);
+	const h = new Map<string, Handler[]>();
+	const cmds = new Map<string, any>();
+	const notes: string[] = [];
+	module.default({
+		...pi,
+		on: (e: string, handler: Handler) => h.set(e, [...(h.get(e) ?? []), handler]),
+		registerCommand: (n: string, o: any) => cmds.set(n, o),
+	});
+	const ctxOf = (id: string) => ({
+		...ctx,
+		cwd: base,
+		ui: { notify: (message: string) => notes.push(message) },
+		sessionManager: { getBranch: () => [], getSessionId: () => id },
+	});
+	const s1 = ctxOf("session-s1");
+	const s2 = ctxOf("session-s2");
+
+	await h.get("session_start")![0]({ type: "session_start" }, s1);
+	await tick(150);
+	notes.length = 0;
+	await cmds.get("dingtalk").handler("status", s1);
+	const fromS1 = notes.at(-1) ?? "";
+	check("绑定会话的 status 不提示归属不符", !fromS1.includes("归属不符"), fromS1);
+	check("status 展示桥绑定会话 id", fromS1.includes("桥绑定会话") && fromS1.includes("session-s1"), fromS1);
+
+	notes.length = 0;
+	await cmds.get("dingtalk").handler("status", s2);
+	const fromS2 = notes.at(-1) ?? "";
+	check(
+		"未绑定会话的 status 提示归属不符并给出接管指引",
+		fromS2.includes("归属不符") && fromS2.includes("/dingtalk takeover"),
+		fromS2,
+	);
 
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
