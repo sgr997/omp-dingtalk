@@ -66,7 +66,9 @@ function codeBlock(body: string): string {
  * the list item above it).
  */
 function replyBlock(body: string): string {
-	const lines = truncate(body, 1400).split("\n");
+	// No truncation here: `notify()` splits an over-long body into several
+	// messages, so the reply is shown in full instead of ending in "…".
+	const lines = body.split("\n");
 	const out: string[] = [];
 	let inFence = false;
 	for (let i = 0; i < lines.length; i++) {

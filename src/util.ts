@@ -26,6 +26,59 @@ export function truncate(text: unknown, max: number): string {
 }
 
 /**
+ * Split a message body into chunks no longer than `max` characters.
+ *
+ * DingTalk rejects an over-long message outright instead of delivering the
+ * head, so the only way to show a long reply in full is several messages.
+ * Boundaries fall on blank lines first (paragraph stays whole), then on line
+ * breaks, then on a hard cut. A fenced code block is never left open across a
+ * boundary: the chunk closes with the fence and the next one reopens it, so
+ * both halves still render as code instead of garbage.
+ */
+export function splitMessage(text: string, max: number): string[] {
+	if (max <= 0 || text.length <= max) return [text];
+	const lines = text.split("\n");
+	const chunks: string[] = [];
+	let buf: string[] = [];
+	let len = 0;
+	let inFence = false;
+	let reopen = false; // current buffer must start by reopening a fence
+
+	// Fencing is applied here, when the chunk is sealed, so a reopen marker
+	// is never counted against the next chunk's budget.
+	const flush = (): void => {
+		if (buf.length === 0) return;
+		let body = buf.join("\n");
+		if (reopen) body = `\`\`\`\n${body}`;
+		if (inFence) body = `${body}\n\`\`\``;
+		chunks.push(body);
+		buf = [];
+		len = 0;
+		reopen = inFence;
+	};
+
+	for (const raw of lines) {
+		if (buf.length > 0 && len + 1 + raw.length > max) flush();
+		if (buf.length === 0 && raw.length >= max - (inFence ? 8 : 0)) {
+			// A single line that cannot fit even on its own: hard cut it. The
+			// fence (reopen + close) costs a few chars, so give it room.
+			const pieceMax = Math.max(1, max - (inFence ? 8 : 0));
+			for (let at = 0; at < raw.length; at += pieceMax) {
+				buf = [raw.slice(at, at + pieceMax)];
+				len = buf[0]?.length ?? 0;
+				flush();
+			}
+			continue;
+		}
+		buf.push(raw);
+		len += 1 + raw.length;
+		if (/^`{3,}/.test(raw.trim())) inFence = !inFence;
+	}
+	flush();
+	return chunks.length > 0 ? chunks : [text];
+}
+
+/**
  * Truncate a filesystem path while keeping its last segment visible.
  *
  * Plain `truncate` keeps the head, so a long path loses the project/session

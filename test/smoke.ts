@@ -13,6 +13,7 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { splitMessage } from "../src/util";
 
 // --- environment must be set before the plugin modules are imported ---------
 const scratch = mkdtempSync(join(tmpdir(), "omp-dingtalk-smoke-"));
@@ -1971,6 +1972,81 @@ console.log("\n[34] /dingtalk status 在桥绑定会话与当前会话不符时�
 	);
 
 	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[35] 超长回复按多条消息全量推送（不再截断成 …）");
+{
+	// notify() used to hard-truncate every card to notify.maxTextChars, so a
+	// long final reply arrived as "…". DingTalk rejects an over-long message
+	// outright, so the fix is several messages — each under the budget — that
+	// together carry the whole reply.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-longreply-"));
+	const cfgPath = join(base, "dingtalk.json");
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=LONGREPLYTOKEN", secret: "" },
+			stream: { enabled: false },
+			notify: { onlyWhenTakenOver: false, maxTextChars: 400, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+	const module = await import(`../src/index.ts?longreply=${Date.now()}`);
+	const h = new Map<string, Handler[]>();
+	module.default({ ...pi, on: (e: string, handler: Handler) => h.set(e, [...(h.get(e) ?? []), handler]) });
+	const c = { ...ctx, cwd: base, sessionManager: { getBranch: () => [], getSessionId: () => "session-long" } };
+	await h.get("session_start")![0]({ type: "session_start" }, c);
+	await tick(150);
+
+	const marker = "结尾哨兵-ZZZ";
+	const reply =
+		Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 段：这是一段足够长的回复正文，用来验证超长内容会被完整地拆进多条消息。`).join("\n\n") +
+		`\n\n${marker}`;
+	const before = webhookPosts().length;
+	await h.get("session_stop")![0](
+		{
+			type: "session_stop",
+			last_assistant_message: { role: "assistant", content: [{ type: "text", text: reply }] },
+		},
+		c,
+	);
+	// All chunks drain quickly in the harness (MIN_GAP_MS=5); wait until the
+	// sentinel that only lives at the very end of the reply actually lands.
+	await waitFor(() => webhookPosts().slice(before).some((p) => String(p.body?.markdown?.text ?? "").includes(marker)));
+	const posts = webhookPosts().slice(before);
+	check("超长回复被拆成多条消息", posts.length >= 2, posts.length);
+	check(
+		"每条都不超过 maxTextChars（含围栏余量）",
+		posts.every((p) => String(p.body?.markdown?.text ?? "").length <= 410),
+		posts.map((p) => String(p.body?.markdown?.text ?? "").length).join(","),
+	);
+	check("末尾哨兵出现（内容零丢失）", posts.some((p) => String(p.body?.markdown?.text ?? "").includes(marker)), "");
+	check("多块标题带 (n/N) 角标", String(posts[0]?.body?.markdown?.title ?? "").includes("(1/"), String(posts[0]?.body?.markdown?.title));
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[36] splitMessage：长回复分块、围栏成对、正文零丢失");
+{
+	const body = Array.from({ length: 12 }, (_, i) => `line ${i + 1} 正文内容`).join("\n");
+	const ch = splitMessage(body, 60);
+	check("多行文本被拆分", ch.length > 1, ch.length);
+	check("每块不超预算", ch.every((x) => x.length <= 60), ch.map((x) => x.length).join(","));
+	check("重拼无遗漏", ch.join("\n") === body);
+
+	const code = "```ts\n" + Array.from({ length: 20 }, (_, i) => `const a${i} = ${i};`).join("\n") + "\n```";
+	const cc = splitMessage(code, 80);
+	check(
+		"代码块跨消息仍成对闭合",
+		cc.every((x) => (x.match(/```/g) ?? []).length % 2 === 0),
+		cc.map((x) => (x.match(/```/g) ?? []).length).join(","),
+	);
+
+	const single = "字".repeat(500);
+	const sc = splitMessage(single, 100);
+	check("超长单行硬切且零丢失", sc.join("") === single && sc.every((x) => x.length <= 100), sc.length);
 }
 
 // --- summary ----------------------------------------------------------------

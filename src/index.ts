@@ -56,7 +56,7 @@ import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
 import { ApprovalRegistry, CommandRouter, type ApiLike, type ApprovalDecision, type CtxLike, type PendingApproval } from "./router";
 import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./questions";
 import { DingTalkStream, type StreamStatus } from "./stream";
-import { extractText, extractToolNames, safeJson, truncate, truncatePath } from "./util";
+import { extractText, extractToolNames, safeJson, splitMessage, truncate, truncatePath } from "./util";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
@@ -240,12 +240,21 @@ class Bridge {
 			this.log.debug("没有可用的出站通道，跳过通知", { title: message.title });
 			return;
 		}
-		this.sender.enqueue({
-			title: message.title,
-			text: truncate(message.text, this.cfg.notify.maxTextChars),
-			priority: options.priority ?? "normal",
-			dedupeKey: options.dedupeKey,
-		});
+		// DingTalk rejects an over-long message instead of delivering its head,
+		// so a long reply is sent as several messages rather than cut short.
+		// `maxTextChars` is the per-message budget, not the total.
+		const chunks = splitMessage(message.text, this.cfg.notify.maxTextChars);
+		for (let i = 0; i < chunks.length; i++) {
+			const part = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
+			this.sender.enqueue({
+				title: `${message.title}${part}`,
+				text: chunks[i],
+				priority: options.priority ?? "normal",
+				// Each chunk needs its own dedupe key, or the second one would
+				// be merged into the first and the rest of the reply lost.
+				dedupeKey: options.dedupeKey ? `${options.dedupeKey}#${i}` : undefined,
+			});
+		}
 	}
 
 	/** Whether an outbound push is allowed right now (takeover gate + config). */
