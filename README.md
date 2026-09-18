@@ -223,6 +223,32 @@ cp config.example.json ~/.omp/dingtalk.json
 
 `bun run doctor` 会提示旧字段残留。代码对旧文件有兜底：读不到 `control.allowUserId` 时会回退读旧键的第一个值并打告警，所以漏改不会让机器人变成「谁都不理」，但配置里留着旧键会一直告警。
 
+### 多个钉钉机器人（可选）
+
+顶层字段就是**默认机器人**（`default`），它持有全局设置（`enabled` / `notify` / `approval` / `question` / `quiet`）和一套自己的 `webhook` / `stream` / `outbound` / `control`。想再加机器人，在 `robots` 映射里按名字各配一份：命名机器人**继承**所有全局设置和默认机器人的凭据，只覆盖你自己写的部分。
+
+```json
+{
+  "webhook": { "url": "…默认机器人的 webhook…" },
+  "stream": { "clientId": "…", "clientSecret": "…", "robotCode": "…" },
+  "control": { "allowUserId": "…" },
+  "robots": {
+    "home": {
+      "webhook": { "url": "…home 机器人的 webhook…" },
+      "stream": { "clientId": "…", "clientSecret": "…", "robotCode": "…" },
+      "control": { "allowUserId": "…" }
+    },
+    "work": { "webhook": { "url": "…" }, "stream": { "…": "…" } }
+  }
+}
+```
+
+- **绑定**：会话默认绑 `default`；在 omp 里执行 `/dingtalk takeover <名字>` 就绑定并接管指定机器人（`/dingtalk takeover` 不带名字 = `default`）。`/dingtalk release` 解除接管，并回到默认机器人继续发通知。
+- **各自独立**：每个机器人有自己的锁（按 `clientId` 分片）和出站通道。窗口 A 接管 `home`、窗口 B 接管 `work` 可以同时远程控制、互不抢占；同一个机器人被两个会话同时接管时，仍然是后来者抢占。
+- **谁管谁**：`control.allowUserId` 可以每个机器人不同——不同机器人交给不同人控制。通知、审批、提问都走当前接管的那个机器人。
+- `robots` 里的名字不能叫 `default`（那是顶层配置的保留名）。给不存在的名字执行 `takeover` 会被拒绝并列出可用项。
+- 多机器人一样适用「接管会话是唯一出口」：未接管时走默认机器人，接管后走被接管的机器人，旁观会话照常静默。
+
 ---
 
 ## 5. 两种用法
@@ -388,7 +414,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 
 > 表情走钉钉企业应用的 `emotion/reply` 接口，**不过期**（不像 sessionWebhook）——长任务跑几十分钟，结尾的 ✅/❌ 照样打得到。表情接口不可用时自动回落到回复卡片。
 
-终端里还有个本地命令：`/dingtalk status | test | quiet on|off`。输入 `/dingtalk `（带空格）或前缀（如 `/dingtalk ta`）会弹出子命令补全，带中文说明。
+终端里还有个本地命令：`/dingtalk status | takeover [机器人名] | release | test | quiet on|off`。输入 `/dingtalk `（带空格）或前缀（如 `/dingtalk ta`）会弹出子命令补全，带中文说明；补全 `takeover` 后还会继续补全可用的机器人名。`/dingtalk status` 会显示当前绑定的机器人和全部可用机器人。
 
 另外注册了一个 `dingtalk_notify` 工具，模型在任务跑完但你不确定用户还在不在时，可以自己主动推送一条通知。
 
@@ -455,7 +481,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 239 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。
+- `test/smoke.ts` — 247 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
