@@ -2049,6 +2049,91 @@ console.log("\n[36] splitMessage：长回复分块、围栏成对、正文零丢
 	check("超长单行硬切且零丢失", sc.join("") === single && sc.every((x) => x.length <= 100), sc.length);
 }
 
+console.log("\n[37] 多机器人：robots 映射解析 + takeover <name> 切换出站目标");
+{
+	// A named robot keeps the global settings and overrides webhook / stream /
+	// control. takeOver(name) must re-point the sender at that robot, and the
+	// takeover card + subsequent notifications must go to that robot's webhook.
+	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-multi-"));
+	const cfgPath = join(base, "dingtalk.json");
+	const ALPHA_TOKEN = "ALPHATOKEN";
+	const BETA_TOKEN = "BETATOKEN";
+	writeFileSync(
+		cfgPath,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEFTOKEN", secret: "" },
+			stream: { enabled: true, clientId: "def-client", clientSecret: "def-secret", robotCode: "dingdef" },
+			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+			robots: {
+				alpha: {
+					webhook: { url: `https://oapi.dingtalk.com/robot/send?access_token=${ALPHA_TOKEN}`, secret: "" },
+					stream: { enabled: true, clientId: "alpha-client", clientSecret: "alpha-secret", robotCode: "dingalpha" },
+				},
+				beta: {
+					webhook: { url: `https://oapi.dingtalk.com/robot/send?access_token=${BETA_TOKEN}`, secret: "" },
+					stream: { enabled: true, clientId: "beta-client", clientSecret: "beta-secret", robotCode: "dingbeta" },
+				},
+			},
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = cfgPath;
+	const module = await import(`../src/index.ts?multi=${Date.now()}`);
+	const h = new Map<string, Handler[]>();
+	const cmds = new Map<string, any>();
+	const notes: string[] = [];
+	module.default({
+		...pi,
+		on: (e: string, handler: Handler) => h.set(e, [...(h.get(e) ?? []), handler]),
+		registerCommand: (n: string, o: any) => cmds.set(n, o),
+	});
+	const c = { ...ctx, cwd: base, ui: { notify: (message: string) => notes.push(message) }, sessionManager: { getBranch: () => [], getSessionId: () => "session-multi" } };
+	const postsTo = (token: string) => webhookPosts().slice().filter((p) => p.url.includes(token)).length;
+
+	await h.get("session_start")![0]({ type: "session_start" }, c);
+	await tick(150);
+	notes.length = 0;
+
+	// A takeover for a robot that does not exist is refused, not half-working.
+	await cmds.get("dingtalk").handler("takeover nosuch", c);
+	check("不存在的机器人拒绝接管并列出可用项", String(notes.at(-1) ?? "").includes("没有叫") && String(notes.at(-1) ?? "").includes("alpha"), notes.at(-1));
+
+	const beforeAlpha = postsTo(ALPHA_TOKEN);
+	await cmds.get("dingtalk").handler("takeover alpha", c);
+	await waitFor(() => postsTo(ALPHA_TOKEN) > beforeAlpha);
+	check("takeover alpha 的确认卡发到 alpha 的 webhook", postsTo(ALPHA_TOKEN) > beforeAlpha, postsTo(ALPHA_TOKEN) - beforeAlpha);
+	check("本地提示带机器人名", String(notes.at(-1) ?? "").includes("alpha"), notes.at(-1));
+
+	// A session_stop idle card must go through the active robot too.
+	const beforeAlphaStop = postsTo(ALPHA_TOKEN);
+	await h.get("session_stop")![0](
+		{ type: "session_stop", last_assistant_message: { role: "assistant", content: [{ type: "text", text: "多机器人回合结束" }] } },
+		c,
+	);
+	await waitFor(() => postsTo(ALPHA_TOKEN) > beforeAlphaStop);
+	check("接管后通知发到 alpha（而不是默认机器人）", postsTo(ALPHA_TOKEN) > beforeAlphaStop, postsTo(ALPHA_TOKEN) - beforeAlphaStop);
+
+	notes.length = 0;
+	await cmds.get("dingtalk").handler("status", c);
+	const statusText = notes.at(-1) ?? "";
+	check("status 展示当前机器人 alpha 和可用列表", statusText.includes("当前机器人") && statusText.includes("alpha") && statusText.includes("beta"), statusText);
+
+	// Release returns the session to the default robot for notifications.
+	notes.length = 0;
+	await cmds.get("dingtalk").handler("release", c);
+	check("release 提示已解除", String(notes.at(-1) ?? "").includes("已解除"), notes.at(-1));
+
+	// Switching straight to another robot without release also works.
+	const beforeBeta = postsTo(BETA_TOKEN);
+	await cmds.get("dingtalk").handler("takeover beta", c);
+	await waitFor(() => postsTo(BETA_TOKEN) > beforeBeta);
+	check("takeover beta 的确认卡发到 beta 的 webhook", postsTo(BETA_TOKEN) > beforeBeta, postsTo(BETA_TOKEN) - beforeBeta);
+	check("默认机器人在切换过程中没有收到确认卡", postsTo("DEFTOKEN") === 0, postsTo("DEFTOKEN"));
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
 // --- summary ----------------------------------------------------------------
 console.log(`\n${"=".repeat(56)}`);
 if (failures.length === 0) {

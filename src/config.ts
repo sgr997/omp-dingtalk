@@ -160,6 +160,19 @@ export interface ControlConfig {
 	replyToSession: boolean;
 }
 
+/**
+ * The robot-specific slice of a named robot. Global session settings
+ * (`notify` / `approval` / `question` / `quiet` / `enabled`) stay at the top
+ * level and are shared by every robot; a named robot overrides only the parts
+ * that define its own identity and access control.
+ */
+export interface RobotConfig {
+	webhook?: Partial<WebhookConfig>;
+	stream?: Partial<StreamConfig>;
+	outbound?: Partial<OutboundConfig>;
+	control?: Partial<ControlConfig>;
+}
+
 export interface DingTalkConfig {
 	/** Master switch — lets you keep the plugin installed but inert. */
 	enabled: boolean;
@@ -173,6 +186,12 @@ export interface DingTalkConfig {
 	control: ControlConfig;
 	/** Runtime mute toggled with `/quiet`. */
 	quiet: boolean;
+	/**
+	 * Named robots. The top-level config is the implicit `default` robot; each
+	 * entry here is another robot with its own webhook / stream / outbound /
+	 * control. A session picks one with `/dingtalk takeover <name>`.
+	 */
+	robots?: Record<string, RobotConfig>;
 }
 
 /** Valid `outbound.mode` values, in the order they should be presented. */
@@ -261,6 +280,7 @@ const DEFAULTS: DingTalkConfig = {
 		replyToSession: true,
 	},
 	quiet: false,
+	robots: {},
 };
 
 export interface LoadedConfig {
@@ -361,6 +381,74 @@ function envOverrides(): Record<string, any> {
 	return out;
 }
 
+/** The names of all configured robots, `default` first. */
+export function robotNames(config: DingTalkConfig): string[] {
+	return ["default", ...Object.keys(config.robots ?? {}).filter((name) => name !== "default")];
+}
+
+/**
+ * Resolve the effective configuration for a named robot.
+ *
+ * The top-level config is the implicit `default` robot. A named robot inherits
+ * every global setting and the default robot's own parts, then overrides its
+ * webhook / stream / outbound / control. Shared session settings (`enabled`,
+ * `notify`, `approval`, `question`, `quiet`) always come from the top level.
+ */
+export function resolveRobotConfig(config: DingTalkConfig, name: string): DingTalkConfig {
+	if (name === "default" || !config.robots?.[name]) return config;
+	const robot: RobotConfig = config.robots[name]!;
+	return merge(config, {
+		webhook: robot.webhook,
+		stream: robot.stream,
+		outbound: robot.outbound,
+		control: robot.control,
+	}) as DingTalkConfig;
+}
+
+/**
+ * Credential / transport validation for one robot's effective config.
+ * `label` names the robot for warning prefixes (`default` = no prefix).
+ * Mutates `robot` in place (callers pass a resolved copy for named robots).
+ */
+function validateRobotTransport(robot: DingTalkConfig, label: string, warnings: string[]): void {
+	const prefix = label === "default" ? "" : `[机器人 ${label}] `;
+
+	// Empty allowUserId = every inbound command is refused (fail-closed). That
+	// is the safe default, but it is surprising mid-onboarding, so say it out
+	// loud.
+	if (robot.control.enabled && !robot.control.allowUserId) {
+		warnings.push(`${prefix}control.allowUserId 为空：除 /id 外所有入站指令都会被拒绝。把 /id 返回的 senderStaffId 填进这个字段才能控制 omp。`);
+	}
+
+	// The stream channel is only usable with real credentials.
+	if (robot.stream.enabled && (!robot.stream.clientId || !robot.stream.clientSecret)) {
+		warnings.push(`${prefix}stream.enabled 为 true，但缺少 clientId / clientSecret，入站控制通道不会启动。`);
+		robot.stream.enabled = false;
+	}
+
+	// Report each unusable transport by name, so "why am I getting no
+	// notifications" is answerable from the warnings alone.
+	const wantsWebhook = robot.outbound.mode === "webhook" || robot.outbound.mode === "both";
+	const wantsDirect = robot.outbound.mode === "direct" || robot.outbound.mode === "both";
+	const hasDirectCreds = Boolean(robot.stream.clientId && robot.stream.clientSecret && robot.stream.robotCode);
+
+	if (wantsWebhook && !robot.webhook.url) {
+		warnings.push(`${prefix}outbound.mode 含 "webhook"，但 webhook.url 为空：群通知发不出去。`);
+	}
+	if (wantsDirect && !hasDirectCreds) {
+		warnings.push(`${prefix}outbound.mode 含 "direct"，但缺少 stream.clientId / clientSecret / robotCode：单聊推送发不出去。`);
+	} else if (wantsDirect && !robot.control.allowUserId) {
+		warnings.push(`${prefix}outbound.mode 含 "direct"，但 control.allowUserId 为空：没有推送对象（白名单的这一个人就是推送收件人）。`);
+	}
+
+	// Nothing can be sent without a usable outbound transport, and nothing can be
+	// received without the stream — report that clearly instead of failing silently.
+	const anyOutbound = (wantsWebhook && Boolean(robot.webhook.url)) || (wantsDirect && hasDirectCreds);
+	if (!anyOutbound && !robot.stream.enabled) {
+		warnings.push(`${prefix}出站和入站都没有可用配置：插件不会发送也不会接收任何消息。`);
+	}
+}
+
 /** Load and validate the effective configuration for `cwd`. */
 export function loadConfig(cwd: string): LoadedConfig {
 	const warnings: string[] = [];
@@ -448,39 +536,12 @@ export function loadConfig(cwd: string): LoadedConfig {
 	config.control.requireAt = config.control.requireAt !== false;
 	config.control.autoTakeover = config.control.autoTakeover === true;
 
-	// Empty allowUserId = every inbound command is refused (fail-closed). That
-	// is the safe default, but it is surprising mid-onboarding, so say it out
-	// loud.
-	if (config.control.enabled && !config.control.allowUserId) {
-		warnings.push("control.allowUserId 为空：除 /id 外所有入站指令都会被拒绝。把 /id 返回的 senderStaffId 填进这个字段才能控制 omp。");
-	}
-
-	// The stream channel is only usable with real credentials.
-	if (config.stream.enabled && (!config.stream.clientId || !config.stream.clientSecret)) {
-		warnings.push("stream.enabled 为 true，但缺少 clientId / clientSecret，入站控制通道不会启动。");
-		config.stream.enabled = false;
-	}
-
-	// Report each unusable transport by name, so "why am I getting no
-	// notifications" is answerable from the warnings alone.
-	const wantsWebhook = config.outbound.mode === "webhook" || config.outbound.mode === "both";
-	const wantsDirect = config.outbound.mode === "direct" || config.outbound.mode === "both";
-	const hasDirectCreds = Boolean(config.stream.clientId && config.stream.clientSecret && config.stream.robotCode);
-
-	if (wantsWebhook && !config.webhook.url) {
-		warnings.push('outbound.mode 含 "webhook"，但 webhook.url 为空：群通知发不出去。');
-	}
-	if (wantsDirect && !hasDirectCreds) {
-		warnings.push('outbound.mode 含 "direct"，但缺少 stream.clientId / clientSecret / robotCode：单聊推送发不出去。');
-	} else if (wantsDirect && !config.control.allowUserId) {
-		warnings.push('outbound.mode 含 "direct"，但 control.allowUserId 为空：没有推送对象（白名单的这一个人就是推送收件人）。');
-	}
-
-	// Nothing can be sent without a usable outbound transport, and nothing can be
-	// received without the stream — report that clearly instead of failing silently.
-	const anyOutbound = (wantsWebhook && Boolean(config.webhook.url)) || (wantsDirect && hasDirectCreds);
-	if (!anyOutbound && !config.stream.enabled) {
-		warnings.push("出站和入站都没有可用配置：插件不会发送也不会接收任何消息。");
+	// Validate the default robot's credentials, then each named robot on its
+	// own resolved copy (resolveRobotConfig deep-copies, so fixing a named
+	// robot's stream.enabled=false never mutates the shared config).
+	validateRobotTransport(config, "default", warnings);
+	for (const name of Object.keys(config.robots ?? {})) {
+		validateRobotTransport(resolveRobotConfig(config, name), name, warnings);
 	}
 
 	// "Silent until takeover" plus a takeover that can never happen is permanently silent —

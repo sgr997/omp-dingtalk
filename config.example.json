@@ -86,5 +86,24 @@
     "replyToSession": true
   },
 
+  "robots": {
+    "$comment": "多机器人模式（可选）。顶层字段就是默认机器人（default），上面的 webhook / stream / control 都属于它。想要多个机器人，就在这里按名字各配一份：它们继承全局设置（notify / approval / question / quiet），只覆盖自己的 webhook / stream / outbound / control。在 omp 里用 /dingtalk takeover <名字> 绑定哪个机器人接管本会话；不同 omp 会话可以分别接管不同的机器人，互不抢占。",
+    "home": {
+      "$comment": "例子：第二个机器人，名字叫 home。它有自己的群 Webhook 和 Stream 凭据，control.allowUserId 也可以和 default 不同（不同机器人可以让不同人控制）。",
+      "webhook": {
+        "url": "https://oapi.dingtalk.com/robot/send?access_token=另一个access_token",
+        "secret": ""
+      },
+      "stream": {
+        "enabled": true,
+        "clientId": "",
+        "clientSecret": "",
+        "robotCode": ""
+      },
+      "outbound": { "mode": "webhook" },
+      "control": { "allowUserId": "" }
+    }
+  },
+
   "quiet": false
 }

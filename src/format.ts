@@ -115,10 +115,16 @@ function controlHint(control: "active" | "inert" | "off", scope: "direct" | "gro
 export function fmtTakeoverSuccess(info: {
 	cwd: string;
 	scope: "direct" | "group" | "all";
+	robot?: string;
 	preempted?: { cwd: string; pid: number };
 	releaseSeconds?: number;
 }): Message {
-	const lines = [`## 🎧 钉钉已接管本会话`, ``, `- **目录**: \`${truncatePath(info.cwd, 120)}\``];
+	const lines = [
+		`## 🎧 钉钉已接管本会话`,
+		``,
+		`- **目录**: \`${truncatePath(info.cwd, 120)}\``,
+		...(info.robot && info.robot !== "default" ? [`- **机器人**: \`${info.robot}\``] : []),
+	];
 	if (info.preempted) {
 		lines.push(
 			``,

@@ -24,7 +24,7 @@
  *    never drive a session you are sitting in front of by accident.
  */
 import type { ExtensionAPI } from "./pi-types";
-import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
+import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, resolveRobotConfig, robotNames, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
 import { DingTalkSender } from "./dingtalk";
 import {
 	buildAskTimeoutResult,
@@ -110,6 +110,12 @@ class Bridge {
 	 */
 	takenOver = false;
 	/**
+	 * The robot this session is currently bound to. `default` is the implicit
+	 * top-level config; a named robot is bound with `/dingtalk takeover <name>`.
+	 * Changing it re-points the sender / lock / stream / router at that robot.
+	 */
+	activeRobotName = "default";
+	/**
 	 * When the current run started — the user prompt (or session start) up to the
 	 * moment the agent goes idle again.
 	 *
@@ -164,13 +170,29 @@ class Bridge {
 		// `approvals` outlives config reloads so in-flight requests are not lost.
 		this.approvals = new ApprovalRegistry(this.log);
 		this.questions = new QuestionRegistry(this.log);
-		this.sender = new DingTalkSender(this.cfg, this.log);
+		this.sender = new DingTalkSender(this.activeCfg, this.log);
 		this.router = this.#buildRouter();
+	}
+
+	/** Names of every configured robot, `default` first. */
+	get robotNames(): string[] {
+		return robotNames(this.cfg);
+	}
+
+	/**
+	 * The effective config for the currently bound robot.
+	 *
+	 * Every session starts bound to `default` (the top-level config). A named
+	 * robot is bound explicitly with `/dingtalk takeover <name>` and combines
+	 * the global settings with its own webhook / stream / outbound / control.
+	 */
+	get activeCfg(): DingTalkConfig {
+		return resolveRobotConfig(this.cfg, this.activeRobotName);
 	}
 
 	#buildRouter(): CommandRouter {
 		return new CommandRouter({
-			cfg: this.cfg,
+			cfg: this.activeCfg,
 			log: this.log,
 			sender: this.sender,
 			approvals: this.approvals,
@@ -184,6 +206,19 @@ class Bridge {
 	}
 
 	/**
+	 * Point this session at a named robot: re-target the sender, rebuild the
+	 * router against the active config. Must be followed by a takeover or
+	 * refresh, or the stream is not re-opened. Reusing the sender instance
+	 * keeps the rate-limit window (a fresh instance would reset it and reorder
+	 * the backlog).
+	 */
+	#setActiveRobot(name: string): void {
+		this.activeRobotName = name;
+		this.sender.updateConfig(this.activeCfg);
+		this.router = this.#buildRouter();
+	}
+
+	/**
 	 * Re-read the config files. Editing `dingtalk.json` and starting a new
 	 * session picks the change up without restarting omp; the Stream connection
 	 * is only torn down when its own credentials changed.
@@ -192,14 +227,17 @@ class Bridge {
 		const next = loadConfig(this.cwd);
 		if (JSON.stringify(next.config) === JSON.stringify(this.cfg)) return false;
 
-		const streamChanged = JSON.stringify(next.config.stream) !== JSON.stringify(this.cfg.stream);
+		const streamChanged =
+			JSON.stringify(next.config.stream) !== JSON.stringify(this.cfg.stream) ||
+			JSON.stringify(next.config.robots) !== JSON.stringify(this.cfg.robots);
 		if (this.cfg.quiet !== next.config.quiet) this.quiet = next.config.quiet;
 
 		this.loaded = next;
 		this.cfg = next.config;
 		// Reuse the sender: a new instance would reset the rate-limit window and
 		// race the old one's backlog, so messages could arrive out of order.
-		this.sender.updateConfig(next.config);
+		// Re-point it at the still-active robot, which may itself have moved.
+		this.sender.updateConfig(this.activeCfg);
 		this.router = this.#buildRouter();
 
 		if (streamChanged) {
@@ -275,7 +313,7 @@ class Bridge {
 			return "钉钉通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 `/dingtalk takeover`。";
 		}
 		if (!this.sender.configured) {
-			return `当前没有可用的出站通道（outbound.mode = ${this.cfg.outbound.mode}）。`;
+			return `当前没有可用的出站通道（outbound.mode = ${this.activeCfg.outbound.mode}）。`;
 		}
 		return undefined;
 	}
@@ -289,7 +327,11 @@ class Bridge {
 	 * reads nothing and claims nothing: it just computes the file path.
 	 */
 	#lockForRead(): TakeoverLock {
-		return this.lock ?? new TakeoverLock(this.cfg.stream.clientId, this.log);
+		const clientId = this.activeCfg.stream.clientId;
+		// `lock` may belong to a previously bound robot; only reuse it when it
+		// matches the active robot's credential.
+		if (this.lock && this.#lockClientId === clientId) return this.lock;
+		return new TakeoverLock(clientId, this.log);
 	}
 
 	/** Another live session holds this app's channel; this session is a bystander. */
@@ -488,7 +530,8 @@ class Bridge {
 				: "- **接管锁**: 空闲";
 
 		return [
-			`- **出站通道**: ${OUTBOUND_MODE_LABELS[this.cfg.outbound.mode] ?? this.cfg.outbound.mode}${this.sender.configured ? "" : "（当前不可用）"}`,
+			`- **当前机器人**: ${this.activeRobotName === "default" ? "default（顶层配置）" : this.activeRobotName} · 可选: ${this.robotNames.join(" / ")}`,
+			`- **出站通道**: ${OUTBOUND_MODE_LABELS[this.activeCfg.outbound.mode] ?? this.activeCfg.outbound.mode}${this.sender.configured ? "" : "（当前不可用）"}`,
 			`- **单聊收件人**: ${this.sender.recipientCount} 人`,
 			`- **通知队列**: ${stats.queued} 待发 / 已发 ${stats.delivered} / 丢弃 ${stats.dropped} / 失败 ${stats.failed}`,
 			`- **钉钉接管**: ${inbound}`,
@@ -501,16 +544,17 @@ class Bridge {
 		];
 	}
 
-	/** Open the inbound channel. Idempotent — safe to call on every takeover. */
+	/** Open the inbound channel for the active robot. Idempotent — safe to call on every takeover. */
 	startStream(): void {
-		if (!this.cfg.enabled || !this.cfg.stream.enabled || this.stream) return;
+		const ac = this.activeCfg;
+		if (!this.cfg.enabled || !ac.stream.enabled || this.stream) return;
 		if (!this.takenOver) {
 			this.log.debug("尚未接管，跳过 Stream 建连");
 			return;
 		}
 		this.stream = new DingTalkStream({
-			clientId: this.cfg.stream.clientId,
-			clientSecret: this.cfg.stream.clientSecret,
+			clientId: ac.stream.clientId,
+			clientSecret: ac.stream.clientSecret,
 			logger: this.log,
 			onMessage: (message) => {
 				if (message?.msgId) this.#lastInboundMessage = { msgId: message.msgId, conversationId: message.conversationId, robotCode: message.robotCode };
@@ -533,7 +577,7 @@ class Bridge {
 
 	/** (Re)create the lock if the app credential changed since we last took over. */
 	#ensureLock(): TakeoverLock {
-		const clientId = this.cfg.stream.clientId;
+		const clientId = this.activeCfg.stream.clientId;
 		if (!this.lock || this.#lockClientId !== clientId) {
 			this.lock?.release();
 			this.lock = new TakeoverLock(clientId, this.log);
@@ -582,19 +626,39 @@ class Bridge {
 	}
 
 	/**
-	 * Hand inbound control to DingTalk. Refuses (rather than half-working) when
-	 * the channel cannot actually be opened, so the terminal gets a real reason.
+	 * Hand inbound control to DingTalk, bound to `name` (default `default`).
+	 * Switching robots mid-takeover re-points the sender / lock / stream at the
+	 * new robot's credentials — each robot has its own lock, so a session bound
+	 * to robot A and one bound to robot B can both be live at once. Refuses
+	 * (rather than half-working) when the channel cannot actually be opened, so
+	 * the terminal gets a real reason.
 	 */
-	takeOver(): { ok: boolean; reason?: string; preempted?: LockHolder } {
+	takeOver(name = "default"): { ok: boolean; reason?: string; preempted?: LockHolder } {
 		if (!this.cfg.enabled) return { ok: false, reason: "插件被 `enabled: false` 关闭了" };
-		if (!this.cfg.control.enabled) return { ok: false, reason: "`control.enabled: false`，入站控制已禁用" };
-		if (!this.cfg.stream.enabled) {
+		if (!this.robotNames.includes(name)) {
+			return { ok: false, reason: `没有叫 \`${name}\` 的机器人。可用: ${this.robotNames.join(" / ")}` };
+		}
+		// Validate the *target* robot before re-pointing anything: switching
+		// first and failing after would leave the session bound to a robot
+		// whose channel never opened (takenOver=true, no stream).
+		const target = resolveRobotConfig(this.cfg, name);
+		if (!target.control.enabled) return { ok: false, reason: "`control.enabled: false`，入站控制已禁用" };
+		if (!target.stream.enabled) {
 			return {
 				ok: false,
-				reason: this.cfg.stream.clientId && this.cfg.stream.clientSecret
+				reason: target.stream.clientId && target.stream.clientSecret
 					? "`stream.enabled: false`"
 					: "缺少 stream.clientId / clientSecret（或 stream.enabled 为 false）",
 			};
+		}
+		// Re-point at the requested robot, so the stream / lock below see the
+		// same config. A live stream belongs to the previous robot; drop it
+		// before opening the new one (startStream below restarts it).
+		if (name !== this.activeRobotName) {
+			this.#setActiveRobot(name);
+			this.stream?.stop();
+			this.stream = undefined;
+			this.streamStatus = { state: "idle", reconnects: this.streamStatus.reconnects };
 		}
 		const already = this.takenOver;
 		const acquired = this.#ensureLock().acquire(this.cwd);
@@ -603,7 +667,7 @@ class Bridge {
 		this.takenOver = true;
 		this.#startLockHeartbeat();
 		this.startStream();
-		if (!already) this.log.info("钉钉已接管本会话", { scope: this.cfg.control.scope });
+		if (!already) this.log.info("钉钉已接管本会话", { robot: name, scope: target.control.scope });
 		if (acquired.previous) {
 			this.log.warn(`已从另一个会话手里抢占接管：${acquired.previous.cwd} (PID ${acquired.previous.pid})`);
 		}
@@ -614,6 +678,9 @@ class Bridge {
 	release(): { wasTakenOver: boolean } {
 		const wasTakenOver = this.takenOver;
 		this.takenOver = false;
+		// Releasing control also unbinds the robot: with nothing taken over,
+		// notifications go through the default robot again (see activeCfg).
+		if (this.activeRobotName !== "default") this.#setActiveRobot("default");
 		this.#stopLockHeartbeat();
 		this.lock?.release();
 		if (this.stream) {
@@ -995,7 +1062,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					b.notify(
 						fmtTakeoverSuccess({
 							cwd: b.cwd,
-							scope: b.cfg.control.scope,
+							scope: b.activeCfg.control.scope,
 							preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
 							releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
 						}),
@@ -1008,7 +1075,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				// the user asked for with `/dingtalk takeover`. Only an explicit
 				// takeover elsewhere (later wins) or `/dingtalk release` changes holders.
 				b.log.info("沿用已有钉钉接管（control.autoTakeover = false 既不自动接管、也不自动释放）");
-			} else if (b.cfg.enabled && b.cfg.stream.enabled) {
+			} else if (b.cfg.enabled && b.activeCfg.stream.enabled) {
 				// Name the other owner explicitly: plain "未接管" reads as "nobody
 				// controls the account", when in fact another session does.
 				const owner = b.channelOwner;
@@ -1300,17 +1367,25 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	// -------------------------------------------------------------------------
 
 	pi.registerCommand("dingtalk", {
-		description: "钉钉机器人：status | takeover | release | test | quiet on|off | help",
+		description: "钉钉机器人：status | takeover [机器人名] | release | test | quiet on|off | help",
 		getArgumentCompletions: (prefix: string) => {
 			const subs = [
 				{ value: "status", description: "会话 / 模型 / 待审批 / 发送队列 / 通道状态" },
-				{ value: "takeover", description: "让钉钉接管本会话（远程控制 + 审批）" },
+				{ value: "takeover", description: "让钉钉接管本会话（远程控制 + 审批），可指定机器人名" },
 				{ value: "release", description: "解除接管，关闭入站通道" },
 				{ value: "test", description: "发一条测试通知到钉钉，确认能收到" },
 				{ value: "quiet", description: "静音开关：quiet on | quiet off" },
 				{ value: "help", description: "钉钉指令说明" },
 			];
 			const p = String(prefix ?? "").trim().toLowerCase();
+			// After `takeover`, complete the robot names (including `default`).
+			if (prefix && /^takeover\s+/i.test(String(prefix ?? "").trim())) {
+				const rest = String(prefix ?? "").trim().split(/\s+/).slice(1).join(" ").toLowerCase();
+				const live = bridge ? bridge.robotNames : ["default"];
+				return live
+					.filter((name) => !rest || name.toLowerCase().startsWith(rest))
+					.map((name) => ({ value: name, label: name, description: name === "default" ? "顶层配置机器人" : `命名机器人 ${name}` }));
+			}
 			return subs
 				.filter((s) => !p || s.value.startsWith(p))
 				.map((s) => ({ value: s.value, label: s.value, description: s.description }));
@@ -1327,7 +1402,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				const action = (sub ?? "").toLowerCase();
 
 				if (action === "takeover" || action === "接管") {
-					const result = b.takeOver();
+					const robotName = (rest[0] ?? "").trim() || "default";
+					const result = b.takeOver(robotName);
 					const hint = b.cfg.notify.onlyWhenTakenOver
 						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
 						: "";
@@ -1336,7 +1412,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						: "";
 					ctx.ui?.notify?.(
 						result.ok
-							? `钉钉已接管本会话（${SCOPE_LABELS[b.cfg.control.scope] ?? b.cfg.control.scope}）。现在可以在钉钉里发消息指挥它；用 /dingtalk release 解除。${stolen}${hint}`
+							? `钉钉已接管本会话（机器人 ${robotName} · ${SCOPE_LABELS[b.activeCfg.control.scope] ?? b.activeCfg.control.scope}）。现在可以在钉钉里发消息指挥它；用 /dingtalk release 解除。${stolen}${hint}`
 							: `无法接管：${result.reason}`,
 						result.ok ? "info" : "error",
 					);
@@ -1354,7 +1430,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						b.notify(
 							fmtTakeoverSuccess({
 								cwd: b.cwd,
-								scope: b.cfg.control.scope,
+								robot: robotName,
+								scope: b.activeCfg.control.scope,
 								preempted: result.preempted ? { cwd: result.preempted.cwd, pid: result.preempted.pid } : undefined,
 								releaseSeconds: result.preempted ? Math.round(heartbeatMs() / 1000) : undefined,
 							}),
@@ -1374,7 +1451,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				if (action === "test") {
 					if (!b.sender.configured) {
 						ctx.ui?.notify?.(
-							`当前没有可用的出站通道（outbound.mode = ${b.cfg.outbound.mode}），无法发送测试消息。`,
+							`当前没有可用的出站通道（outbound.mode = ${b.activeCfg.outbound.mode}），无法发送测试消息。`,
 							"error",
 						);
 						return;
@@ -1409,11 +1486,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				if (action === "help" || action === "?") {
 					ctx.ui?.notify?.(
 						[
-							"/dingtalk status          — 配置 + 运行状态",
-							"/dingtalk takeover        — 让钉钉接管本会话（开启入站控制）",
-							"/dingtalk release         — 解除接管，关闭入站通道",
-							"/dingtalk test            — 发一条测试通知",
-							"/dingtalk quiet on|off    — 静音 / 恢复通知",
+							"/dingtalk status                  — 配置 + 运行状态（含当前机器人）",
+							"/dingtalk takeover                — 让钉钉接管本会话（默认机器人，开启入站控制）",
+							"/dingtalk takeover <机器人名>     — 绑定并接管指定机器人",
+							"/dingtalk release                 — 解除接管，关闭入站通道",
+							"/dingtalk test                    — 发一条测试通知",
+							"/dingtalk quiet on|off            — 静音 / 恢复通知",
+							`可用机器人: ${b.robotNames.join(" / ")}`,
 						].join("\n"),
 						"info",
 					);
