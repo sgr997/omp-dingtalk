@@ -133,6 +133,34 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 代码对旧文件有兜底：读不到 `control.allowUserId` 时回退读旧键的第一个值并打告警，所以漏改不会让机器人变成「谁都不理」；但旧键留着会一直告警，要清掉。`bun run doctor` 也会提示。
 
+### 4.2 多个钉钉机器人（可选）
+
+一个 omp 实例可以接多个钉钉机器人，不同会话各绑定一个，互不抢占。**默认不需要**——没配 `robots` 时一切行为和单机器人一样，老配置不用动。
+
+```json
+{
+  "webhook": { "url": "https://oapi.dingtalk.com/robot/send?access_token=默认机器人" },
+  "stream": { "enabled": true, "clientId": "default-client", "clientSecret": "…", "robotCode": "ding…" },
+  "robots": {
+    "home": {
+      "webhook": { "url": "https://oapi.dingtalk.com/robot/send?access_token=home机器人" },
+      "stream": { "enabled": true, "clientId": "home-client", "clientSecret": "…", "robotCode": "dinghome" }
+    },
+    "work": {
+      "outbound": { "mode": "direct" },
+      "control": { "allowUserId": "另一个人的Id" }
+    }
+  }
+}
+```
+
+规则（agent 按这些引导，别让用户自己研究）：
+- 命名机器人只写自己不同的字段，其余继承全局设置；机器人名不能叫 `default`。
+- 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 只解除控制、不换机器人。
+- 锁按 `stream.clientId` 隔离：会话 A 接管 `home`、会话 B 接管 `work` 互不冲突，可以同时远程控制；两个会话抢同一个机器人，后来者赢。
+- 通知、审批、提问澄清都从**当前接管的机器人**发，没接管时发 `default`。
+- `control.allowUserId` 可以每个机器人不同，把不同机器人交给不同人管。
+
 ---
 
 ## 5. 验证（配置自检，不需要模型凭据）
@@ -168,7 +196,8 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 | 每个新会话都要重新 takeover | 旧版本的「接管不跨会话继承」已废弃。接管现在是显式状态：`/dingtalk takeover` 后跨会话保留，新会话启动不会松开，只有被别的会话抢占或 `/dingtalk release` 才解除 |
 | 开了两个窗口，B 也会推通知 | 接管会话是钉钉的**唯一出口**：一旦有会话接管，通知、审批、提问澄清都只从那个会话发（`notify.onlyWhenTakenOver: false` 也一样），别的会话完全静默（含 `/dingtalk test`）。想让 B 推，就在 B 里 `/dingtalk takeover`（会抢走 A）；想让 A 推，就确保接管在 A，B 里不要接管 |
 | 子代理退出/重试被推送、退出去还像主会话退出 | 已修复。宿主按会话重建扩展工厂：主会话一份插件副本，子代理在**自己的 cwd** 里再绑一份，各自持有独立 `bridge`——只靠 session id 门控挡不住这类泄漏（那是同一副本内的比较）。现在归属是**进程级**的：第一个见到 session id 的绑定拥有插件，其余绑定（子代理）完全静默：不建桥、不推送、不连 Stream。同一副本内带不同 session id 的事件按会话身份区分：子代理是无 UI 的 headless 会话（`hasUI === false`、`mode === "print"`），其事件照旧忽略；**顶层**的第二个会话（切会话/新建/恢复，`hasUI === true` 且 `mode === "tui"`，两个条件都要）会让桥改随新会话，`/dingtalk takeover` 成功也会把桥重绑到接管会话，`autoTakeover:true` 时新会话「后来者覆盖」直接接管——否则会出现「接管成功、锁和 Stream 都正常，却一条都不推」。**例外**：无 UI 的顶层会话（`omp -p`/ACP/SDK 等 `rpc`/`json`/`print` 模式）与子代理在宿主暴露的字段上不可区分，不会自动改绑，须显式 `/dingtalk takeover`；`/dingtalk status` 展示桥绑定会话 id，与被问会话不一致时给出显式提示，被归属过滤丢弃的事件另统计为丢弃计数（丢弃日志保持 debug 级，避免子代理常规流量刷屏）。若再出现，先确认跑的是新版插件（旧 omp 会话要退出重开才载入新代码） |
-| 终端提示「接管已被另一个会话抢占」 | 另一个会话在同一钉钉应用上 takeover 了。本会话已自动释放、Stream 已关闭，**不再往钉钉推任何卡**（钉钉只有一个出口）。想抢回就在本会话再 takeover；不想被抢就给每个会话配不同的 `stream.clientId` |
+| 终端提示「接管已被另一个会话抢占」 | 另一个会话在同一钉钉应用上 takeover 了。本会话已自动释放、Stream 已关闭，**不再往钉钉推任何卡**（钉钉只有一个出口）。想抢回就在本会话再 takeover；不想被抢就给每个会话配不同的 `stream.clientId`（或多机器人模式各自接管不同机器人，见 §4.2） |
+| 想多窗口同时远程控制 | 多机器人模式：每个机器人一把独立的锁（按 `stream.clientId` 隔离），会话 A 接管 A 机器人、会话 B 接管 B 机器人即可并存；抢同一个机器人仍是后来者赢（见 §4.2） |
 | 命令回复延迟几秒 | 正常，出站限流最短间隔 2.2 秒 |
 | 改了配置没生效 | 配置会话启动时重载，开新会话。`/dingtalk status` 会列实际生效的来源 |
 
