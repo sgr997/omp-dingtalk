@@ -20,8 +20,8 @@
  * conservative budget (15/minute, 2.2s minimum gap) and same-key coalescing.
  */
 import type { DingTalkConfig } from "./config";
-import type { Logger } from "./logger";
-import { hmacSha256Base64, sleep } from "./util";
+import type { Logger } from "../../core/logger";
+import { hmacSha256Base64, sleep } from "../../core/util";
 
 export interface SendOptions {
 	title: string;

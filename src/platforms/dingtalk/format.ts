@@ -5,7 +5,7 @@
  * quotes, lists, links and fenced code, but nothing exotic.
  */
 import type { ApprovalRule } from "./config";
-import { fenceSafe, humanDuration, truncate, truncatePath } from "./util";
+import { fenceSafe, humanDuration, truncate, truncatePath } from "../../core/util";
 
 export interface Message {
 	title: string;

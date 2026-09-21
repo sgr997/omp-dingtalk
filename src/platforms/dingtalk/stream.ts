@@ -17,8 +17,8 @@
  * Implemented directly on Bun's global WebSocket + fetch so the plugin stays
  * dependency-free (`omp plugin link` runs no install step).
  */
-import type { Logger } from "./logger";
-import { b64Decode } from "./util";
+import type { Logger } from "../../core/logger";
+import { b64Decode } from "../../core/util";
 
 const GATEWAY_URL = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 /** Fixed topic for robot message callbacks. */

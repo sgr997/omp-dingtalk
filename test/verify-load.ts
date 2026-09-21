@@ -12,7 +12,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { homeDir } from "../src/util";
+import { homeDir } from "../src/core/util";
 
 const PLUGIN_NAME = "omp-dingtalk";
 const EXPECTED_HANDLERS = ["session_start", "turn_start", "turn_end", "session_stop", "session_shutdown", "tool_call", "auto_retry_start", "auto_retry_end", "credential_disabled", "goal_updated", "tool_execution_end"];

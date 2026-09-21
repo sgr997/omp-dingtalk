@@ -23,9 +23,9 @@
  *    `/dingtalk takeover` (or `control.autoTakeover: true`), so DingTalk can
  *    never drive a session you are sitting in front of by accident.
  */
-import type { ExtensionAPI } from "./pi-types";
-import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, resolveRobotConfig, robotNames, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./config";
-import { DingTalkSender } from "./dingtalk";
+import type { ExtensionAPI } from "./core/pi-types";
+import { DEFAULT_APPROVAL_RULES, OUTBOUND_MODE_LABELS, SCOPE_LABELS, describeConfig, loadConfig, resolveRobotConfig, robotNames, type ApprovalRule, type DingTalkConfig, type LoadedConfig } from "./platforms/dingtalk/config";
+import { DingTalkSender } from "./platforms/dingtalk/sender";
 import {
 	buildAskTimeoutResult,
 	buildRemoteAskResult,
@@ -33,7 +33,7 @@ import {
 	type AskRaceBridge,
 	type AskRaceRequest,
 	type AskToolResult,
-} from "./ask-tool";
+} from "./core/ask-tool";
 import {
 	fmtApprovalBlocked,
 	fmtApprovalRequest,
@@ -50,13 +50,13 @@ import {
 	formatApprovalTimeout,
 	setSessionTag,
 	type Message,
-} from "./format";
-import { createLogger, type Logger } from "./logger";
-import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
-import { ApprovalRegistry, CommandRouter, type ApiLike, type ApprovalDecision, type CtxLike, type PendingApproval } from "./router";
-import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./questions";
-import { DingTalkStream, type StreamStatus } from "./stream";
-import { extractText, extractToolNames, safeJson, splitMessage, truncate, truncatePath } from "./util";
+} from "./platforms/dingtalk/format";
+import { createLogger, type Logger } from "./core/logger";
+import { heartbeatMs, TakeoverLock, type LockHolder } from "./core/lock";
+import { ApprovalRegistry, CommandRouter, type ApiLike, type ApprovalDecision, type CtxLike, type PendingApproval } from "./platforms/dingtalk/router";
+import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./core/questions";
+import { DingTalkStream, type StreamStatus } from "./platforms/dingtalk/stream";
+import { extractText, extractToolNames, safeJson, splitMessage, truncate, truncatePath } from "./core/util";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 

@@ -13,7 +13,7 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { splitMessage } from "../src/util";
+import { splitMessage } from "../src/core/util";
 
 // --- environment must be set before the plugin modules are imported ---------
 const scratch = mkdtempSync(join(tmpdir(), "omp-dingtalk-smoke-"));
@@ -480,7 +480,7 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	check("批准后重发同命令放行", !released || released.block !== true, released);
 	// Registry-level one-shot semantics (release-once, unknown key).
 	{
-		const { ApprovalRegistry } = await import("../src/router.ts");
+		const { ApprovalRegistry } = await import("../src/platforms/dingtalk/router.ts");
 		const r = new ApprovalRegistry({ debug() {}, info() {}, warn() {}, error() {} });
 		const freshKey = "bash\u0000{\"command\":\"echo once\"}";
 		const a = r.register({ toolName: "bash", reason: "t", detail: "d", key: freshKey, timeoutMs: 5_000, onTimeout: "deny" });
@@ -1384,7 +1384,7 @@ console.log("\n[24] onlyWhenTakenOver 却永远无法接管 → 必须告警");
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
 	process.env.OMP_DINGTALK_CONFIG = deadConfig;
-	const { loadConfig } = await import("../src/config.ts");
+	const { loadConfig } = await import("../src/platforms/dingtalk/config.ts");
 	const loaded = loadConfig(dir);
 	process.env.OMP_DINGTALK_CONFIG = previous;
 
@@ -1400,7 +1400,7 @@ console.log("\n[25] 接管锁：同一个钉钉应用只允许一个活着的消
 	// Unit-level on purpose: two live sessions cannot be simulated through the
 	// plugin entrypoint (it holds a per-module singleton), but the lock *is* the
 	// whole cross-session protocol, so it can be driven directly.
-	const { TakeoverLock } = await import("../src/lock.ts");
+	const { TakeoverLock } = await import("../src/core/lock.ts");
 	const quiet: any = { debug() {}, info() {}, warn() {}, error() {} };
 	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
 

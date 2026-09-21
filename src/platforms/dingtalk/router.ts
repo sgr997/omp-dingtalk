@@ -6,12 +6,12 @@
  * registry waits for a reply that only the router can deliver.
  */
 import type { DingTalkConfig } from "./config";
-import { DingTalkSender } from "./dingtalk";
+import { DingTalkSender } from "./sender";
 import { fmtHelp, fmtQuestionAnswerEcho, fmtQuiet, fmtStatus, fmtText, formatApprovalInjection, formatQuestionInjection, type Message } from "./format";
-import type { Logger } from "./logger";
-import { QuestionRegistry } from "./questions";
+import type { Logger } from "../../core/logger";
+import { QuestionRegistry } from "../../core/questions";
 import { robotMessageText, type RobotMessage } from "./stream";
-import { shortId, truncate } from "./util";
+import { shortId, truncate } from "../../core/util";
 
 export type ApprovalDecision = "approve" | "deny" | "timeout";
 

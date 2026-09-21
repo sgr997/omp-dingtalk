@@ -9,7 +9,7 @@
  *   bun scripts/debug-stream.ts            抓 20 秒
  *   bun scripts/debug-stream.ts 60000      抓 60 秒
  */
-import { loadConfig } from "../src/config";
+import { loadConfig } from "../src/platforms/dingtalk/config";
 
 const durationMs = Number(process.argv[2] ?? 20_000);
 const { config } = loadConfig(process.cwd());

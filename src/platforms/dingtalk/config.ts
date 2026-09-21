@@ -12,7 +12,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { expandHome, homeDir, truncate } from "./util";
+import { expandHome, homeDir, truncate } from "../../core/util";
 
 export interface WebhookConfig {
 	/** Full custom-robot webhook URL, including `access_token`. */

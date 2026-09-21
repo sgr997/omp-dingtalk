@@ -12,11 +12,11 @@
  *   bun run doctor --no-send    只验入站，不往群里发测试消息
  *   bun run doctor --stream-only
  */
-import { OUTBOUND_MODE_LABELS, describeConfig, loadConfig, type DingTalkConfig } from "../src/config";
-import { DingTalkSender, type SendResult } from "../src/dingtalk";
-import { TakeoverLock } from "../src/lock";
-import { createLogger } from "../src/logger";
-import { DingTalkStream, type StreamStatus } from "../src/stream";
+import { OUTBOUND_MODE_LABELS, describeConfig, loadConfig, type DingTalkConfig } from "../src/platforms/dingtalk/config";
+import { DingTalkSender, type SendResult } from "../src/platforms/dingtalk/sender";
+import { TakeoverLock } from "../src/core/lock";
+import { createLogger } from "../src/core/logger";
+import { DingTalkStream, type StreamStatus } from "../src/platforms/dingtalk/stream";
 
 const args = process.argv.slice(2);
 const skipSend = args.includes("--no-send");
