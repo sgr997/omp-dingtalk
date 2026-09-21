@@ -25,6 +25,8 @@ import type { Logger } from "../../core/logger";
 
 import {
 	DEFAULT_APPROVAL_RULES,
+	OUTBOUND_MODE_LABELS,
+	SCOPE_LABELS,
 	describeConfig,
 	loadConfig,
 	resolveRobotConfig,
@@ -91,6 +93,11 @@ class AdapterSender implements ChannelSender {
 
 	sendEmotion(target: Record<string, unknown> | undefined, emoji: string): Promise<SendResult> {
 		return this.#inner.sendEmotion(target as Parameters<DingTalkSender["sendEmotion"]>[0], emoji);
+	}
+
+	/** Reply in the originating conversation (session webhook), used by the router. */
+	replyToSession(sessionWebhook: string, title: string, text: string, expiresAt?: number): Promise<SendResult> {
+		return this.#inner.replyToSession(sessionWebhook, title, text, expiresAt);
 	}
 }
 
@@ -178,7 +185,7 @@ class AdapterRouter implements ChannelRouter {
 
 const formatter: ChannelFormatter = {
 	setSessionTag,
-	takeoverSuccess: (info) => fmtTakeoverSuccess(info),
+	takeoverSuccess: (info) => fmtTakeoverSuccess(info as Parameters<typeof fmtTakeoverSuccess>[0]),
 	sessionStop: (info) => fmtSessionStop(info),
 	turnEnd: (info) => fmtTurnEnd(info),
 	approvalRequest: (info) => fmtApprovalRequest(info),
@@ -190,6 +197,7 @@ const formatter: ChannelFormatter = {
 	questionTimeout: (info) => fmtQuestionTimeout(info),
 	error: (info) => fmtError(info),
 	help: () => fmtHelp(),
+	scopeLabel: (scope) => SCOPE_LABELS[scope as keyof typeof SCOPE_LABELS] ?? scope,
 	status: (info) => fmtStatus(info),
 	quiet: (on) => fmtQuiet(on),
 	text: (title, text) => fmtText(title, text),
@@ -225,6 +233,7 @@ export const dingtalkAdapter: ChannelAdapter<DingTalkConfig> = {
 	resolveRobot: (config, name) => resolveRobotConfig(config, name),
 	robotNames: (config) => robotNames(config),
 	describeConfig: (loaded) => describeConfig(loaded as unknown as LoadedConfig),
+	describeOutbound: (config) => OUTBOUND_MODE_LABELS[config.outbound.mode] ?? config.outbound.mode,
 	defaultApprovalRules: DEFAULT_APPROVAL_RULES,
 
 	createSender: (config, log) => new AdapterSender(config, log),

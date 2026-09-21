@@ -32,10 +32,16 @@ export interface PlatformConfig {
 		goalUpdated: boolean;
 		approval: boolean;
 		toolUse: { enabled: boolean; tools: string[] };
+		/** Per-message text budget when a long reply is split into several. */
+		maxTextChars: number;
 	};
 	approval: { mode: "off" | "remote"; timeoutMs: number; onTimeout: "deny" | "allow"; rules: ApprovalRule[] };
 	question: { enabled: boolean; timeoutMs: number };
 	control: { enabled: boolean; autoTakeover: boolean; scope: string; allowUserId?: string };
+	/** Inbound-channel identity: the cross-process lock is keyed on `clientId`. */
+	stream: { enabled: boolean; clientId: string };
+	/** Outbound-channel identity (shown in status). Platform-specific shape. */
+	outbound?: { mode: string };
 }
 
 /** A rendered message ready to hand to the platform sender. */
@@ -57,6 +63,21 @@ export interface SendResult {
 	errmsg?: string;
 	/** Set when the message was dropped locally rather than attempted. */
 	dropped?: boolean;
+}
+
+export interface NotifyOptions {
+	priority?: "high" | "normal" | "low";
+	dedupeKey?: string;
+	/** Approvals and errors go out even while muted. */
+	bypassQuiet?: boolean;
+	/**
+	 * Send even when `notify.onlyWhenTakenOver` would suppress it.
+	 *
+	 * Reserved for one case: telling you that a takeover you were actively using
+	 * has just been stolen by another session. Staying silent there would leave
+	 * you believing the channel still drives this session.
+	 */
+	bypassTakeover?: boolean;
 }
 
 /** Outbound half of a platform: serialized, rate-limited, coalescing. */
@@ -113,7 +134,7 @@ export interface ChannelQuestionPack {
 /** The complete message-rendering surface. Core only ever calls these. */
 export interface ChannelFormatter {
 	setSessionTag(tag: string): void;
-	takeoverSuccess(info: { cwd: string; robot?: string; scope: "direct" | "group" | "all"; preempted?: { cwd: string; pid: number }; releaseSeconds?: number }): Message;
+	takeoverSuccess(info: { cwd: string; robot?: string; scope: string; preempted?: { cwd: string; pid: number }; releaseSeconds?: number }): Message;
 	sessionStop(info: { durationMs: number; turns: number; text: string }): Message;
 	turnEnd(info: { turnIndex: number; durationMs: number; text?: string; tools?: string[] }): Message;
 	approvalRequest(info: { id: string; toolName: string; reason: string; detail: string; timeoutMs: number; rulesCount?: number }): Message;
@@ -125,6 +146,8 @@ export interface ChannelFormatter {
 	questionTimeout(info: { id: string; questions: RemoteQuestion[]; timeoutMs: number }): Message;
 	error(info: { kind: string; detail: string; hint?: string }): Message;
 	help(): Message;
+	/** Short human label for a control scope, e.g. "direct" → "单聊". */
+	scopeLabel(scope: string): string;
 	status(info: {
 		lines: string[];
 		pending: { id: string; toolName: string; ageMs: number }[];
@@ -158,6 +181,8 @@ export interface ChannelAdapter<P extends PlatformConfig = PlatformConfig> {
 	robotNames(config: P): string[];
 	/** Platform-specific config summary for `/status`. */
 	describeConfig(loaded: { config: P; sources: string[] }): string[];
+	/** Short human label for the outbound channel (shown in status lines). */
+	describeOutbound(config: P): string;
 	/** Rules used when the user left `approval.rules` empty. */
 	readonly defaultApprovalRules: ApprovalRule[];
 
