@@ -2,7 +2,7 @@
 
 把 OMP 接到钉钉上：**它跑长任务时给你发通知，你不在电脑前也能指挥它。**
 
-- **出站（通知）**：会话启动、本轮跑完变空闲、需要审批、重试耗尽、凭据失效 → 钉钉消息。
+- **出站（通知）**：本轮跑完变空闲、需要审批、重试耗尽、凭据失效 → 钉钉消息。
 - **入站（控制）**：在钉钉里发文字就能给 omp 下指令、批准/拒绝敏感操作、中断执行、切模型、压缩上下文。
 - **双端提问**：模型用「提问（ask）」工具问你问题时，终端和钉钉**同时**弹出，在任意一端作答都算——长任务不会因为没人回答而卡住，你也不会被手机抢走键盘。
 
@@ -173,10 +173,10 @@ cp config.example.json ~/.omp/dingtalk.json
 **配置查找顺序**（后者覆盖前者）：内置默认值 → `~/.omp/agent/dingtalk.json` → `~/.omp/dingtalk.json` → `<项目>/.omp/dingtalk.json` → 环境变量。
 
 - 指定单个文件：`OMP_DINGTALK_CONFIG=/path/to/dingtalk.json`
-- 调限流：`OMP_DINGTALK_MIN_GAP_MS`（默认 2200）、`OMP_DINGTALK_MAX_PER_MIN`（默认 20）。
+- 调限流：`OMP_DINGTALK_MIN_GAP_MS`（默认 2200）、`OMP_DINGTALK_MAX_PER_MIN`（默认 15）。
 - 调接管：`OMP_DINGTALK_HEARTBEAT_MS`（心跳周期，默认 5000，决定被抢占后多久让位）、`OMP_DINGTALK_LOCK_DIR`（锁文件目录，默认 `~/.omp/agent`）。
 - 改完配置**开新会话**即生效，不用重启 omp。
-- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_ID`、`DINGTALK_APPROVAL_MODE`、`DINGTALK_QUESTION_ENABLED`、`DINGTALK_QUESTION_TIMEOUT_MS`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`。
+- 秘密不想落盘就用环境变量：`DINGTALK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_SECRET`、`DINGTALK_WEBHOOK_KEYWORD`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_STREAM_ENABLED`、`DINGTALK_ALLOW_USER_ID`、`DINGTALK_APPROVAL_MODE`、`DINGTALK_QUESTION_ENABLED`、`DINGTALK_QUESTION_TIMEOUT_MS`、`DINGTALK_CONTROL_SCOPE`、`DINGTALK_AUTO_TAKEOVER`、`DINGTALK_OUTBOUND_MODE`、`DINGTALK_DISABLED`（设为 1 则整个插件停用）。
 - 只给某个项目配（比如公司项目）：放到 `<项目>/.omp/dingtalk.json`，只覆盖要改的字段。
 
 ### 只认单聊 + 显式接管（推荐的保守配置）
@@ -193,7 +193,7 @@ cp config.example.json ~/.omp/dingtalk.json
 - `autoTakeover: false` —— 会话启动时**不会**自动连上入站通道，必须在 omp 里敲 `/dingtalk takeover` 才接通。已经接管的会话，新会话启动**不会**把它松开（接管是显式状态，只由 `/dingtalk takeover` 抢占或 `/dingtalk release` 主动解除）。
 - **接管会话是钉钉的唯一出口**：你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发——`onlyWhenTakenOver` 即使是 `false` 也一样。别的会话（旁观者）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，各会话按 `onlyWhenTakenOver` 正常发。
 - `onlyWhenTakenOver: true` —— **接管前一条通知都不发**，接管后才开始发，`/dingtalk release` 之后又停。适合「坐在电脑前不想被打扰，出门前 takeover 一下」。
-  - 它是**全有全无**的：启动、空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
+  - 它是**全有全无**的：空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
   - 要求**能**接管（`stream` 凭据齐全）。如果配了它却又无法接管，配置加载时会明确告警「一条通知也不会有」——这个组合是永久静默，最容易误判成「没问题」。
   - `/dingtalk test` 和 `bun run doctor` 不受影响，仍是验证出站通道的手段。
 - 注意 `autoTakeover: false` 时 `stream.enabled` 仍应为 `true`，否则 `/dingtalk takeover` 会拒绝接管并告诉你原因。
@@ -284,8 +284,8 @@ omp --approval-mode=yolo
 
 内置危险规则（`approval.rules` 留空时生效）：
 
-- `bash`：`rm -rf`、`sudo`、`git push`、`git reset --hard`、`git clean -fd`、`DROP TABLE/DATABASE`、`npm publish`、`curl|sh`、`chmod 777`、`mkfs`、`dd if=`、`shutdown`、`kill -9`
-- `write` / `edit`：`.env`、`id_rsa*`、`*.pem`、`.ssh/**`、`.npmrc`、`.aws/**`
+- `bash`：`rm -rf`、`sudo`、`git push`、`git reset --hard`、`git clean -fd`、`DROP TABLE/DATABASE/SCHEMA`、`npm/pnpm/yarn publish`、`curl`/`wget` 接 `| sh`、`chmod 777`、`mkfs`、`dd if=`、`shutdown`、`reboot`、`kill -9`
+- `write` / `edit`：`.env`、`.env.*`、`id_rsa*`、`id_ed25519*`、`*.pem`、`.ssh/**`、`.npmrc`、`.aws/**`
 
 想自己定义就填 `approval.rules`：
 
@@ -332,7 +332,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 - **谁先答谁赢**：你在终端按了回车，钉钉那边立刻收到「💻 已在本地回答 #XX」并作废；你在手机上回了 `2`，终端的框会自动关闭，模型拿着答案继续。
 - 手机上的回复格式：单选 `2`、多选 `2,4`、多个问题 `1:2 2:1`；回复选项文字也行；回任意文字就是自定义答案。
 
-> 为什么能做到：插件**重注册了同名的 `ask` 工具**，由此拿到这次调用的取消信号——「另一端先答就把这一端取消」必须要它。omp 内部的对话框竞速只对内置的 `/collab` 共享会话开放，扩展拿不到那个位置。细节见 `src/ask-tool.ts` 顶部的注释。
+> 为什么能做到：插件**重注册了同名的 `ask` 工具**，由此拿到这次调用的取消信号——「另一端先答就把这一端取消」必须要它。omp 内部的对话框竞速只对内置的 `/collab` 共享会话开放，扩展拿不到那个位置。细节见 `src/core/ask-tool.ts` 顶部的注释。
 
 超时与边界：
 
@@ -398,7 +398,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 | `/ping` | 连通性测试 |
 | `帮助` / `/help` | 指令表 |
 
-> 为了安全，`停止`、`同意`、`拒绝` 这类**危险指令必须单独发送**（不带参数）—— 所以「stop the server on port 3000」会被当成正常指令投给 omp，而不是中断。
+> 为了安全，`停止`、`状态`、`帮助`、`工具`这类指令**必须单独发送**（不带参数）—— 所以「stop the server on port 3000」会被当成正常指令投给 omp，而不是中断。`同意` / `拒绝` 后面可以跟编号（如 `同意 3`）指定审批单。
 
 ### 消息反馈用表情，不刷屏
 
@@ -428,29 +428,36 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
                     │  Stream WebSocket（入站）     │
                     └───────┬──────────────┬───────┘
                             │              │
-              src/dingtalk.ts│              │src/stream.ts
-                 限流+加签+合并              帧分发/ACK/去重/重连
+                   sender.ts│              │stream.ts
+                 限流+加签+合并│              │帧分发/ACK/去重/重连
                             │              │
                     ┌───────▼──────────────▼───────┐
-                    │        src/index.ts          │
+                    │     src/core/bridge.ts       │
                     │  session/turn/tool_call 事件  │
                     │  ↕ 审批闸门（命中规则即拦截）  │
                     └───────┬──────────────────────┘
                             │
-                    src/router.ts  指令解析 / 鉴权
+                     router.ts  指令解析 / 鉴权
                             │
                       OMP 会话（sendUserMessage / abort / setModel / compact）
 ```
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/index.ts` | 扩展入口：事件订阅、审批闸门、本地命令、`dingtalk_notify` 工具 |
-| `src/stream.ts` | Stream 模式 WebSocket 客户端（零依赖自实现） |
-| `src/dingtalk.ts` | 出站发送：限流队列、加签、`webhook` / `direct` 两条通道、sessionWebhook 回复 |
-| `src/router.ts` | 入站指令路由 + 待审批注册表 |
-| `src/format.ts` | 事件 → 钉钉 markdown |
-| `src/config.ts` | 分层配置加载与合并 |
-| `src/util.ts` / `src/logger.ts` | 工具函数 / 日志 |
+| `src/index.ts` | 扩展入口：纯装配层，把 core 与平台实现组装成 omp 扩展 |
+| `src/core/bridge.ts` | 平台无关的会话桥：事件订阅、审批闸门、提问竞速、通知调度、本地命令 |
+| `src/core/channel.ts` | 平台边界接口（`ChannelAdapter`）：core 只认它，不认具体平台 |
+| `src/core/questions.ts` | 双端提问注册表（`QuestionRegistry`） |
+| `src/core/approval.ts` | 审批注册表（`ApprovalRegistry`）与一次性放行 |
+| `src/core/ask-tool.ts` | `ask` 工具重注册：终端对话框与远程提问竞速 |
+| `src/core/lock.ts` | 跨进程接管锁（按 `clientId` 分片、PID + 心跳双重存活判定） |
+| `src/core/logger.ts` / `src/core/util.ts` | 日志 / 工具函数 |
+| `src/platforms/dingtalk/adapter.ts` | 钉钉侧 `ChannelAdapter` 实现：把 sender / stream / router 等包一层给 core 用 |
+| `src/platforms/dingtalk/sender.ts` | 出站发送：限流队列、加签、`webhook` / `direct` 两条通道、sessionWebhook 回复 |
+| `src/platforms/dingtalk/stream.ts` | Stream 模式 WebSocket 客户端（零依赖自实现） |
+| `src/platforms/dingtalk/router.ts` | 入站指令路由：鉴权、审批/提问处理、指令分发 |
+| `src/platforms/dingtalk/format.ts` | 事件 → 钉钉 markdown |
+| `src/platforms/dingtalk/config.ts` | 分层配置加载与合并 |
 
 ### 关键设计取舍
 
@@ -460,7 +467,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 - **重载配置不重建发送器**：`refreshConfig()` 用 `updateConfig()` 原地换配置。重建实例会重置限流窗口（可能撞上钉钉 20 条/分钟被封 10 分钟），而且老实例并行排空积压会让通知乱序。
 - **收件人就是白名单里那个人**：没有单独的收件人列表，能命令会话的人才收得到推送。反过来若做成「谁发消息谁订阅」，陌生人 DM 一下机器人就能订阅到你的会话通知。
 - **单聊锁定是默认值**：`control.scope` 默认 `direct`，非法值会告警并回退到 `direct` —— 拼错不会把控制面意外放大。同理 `autoTakeover` 默认 `false`。
-- **接管是抢占式的，靠锁兜底**：`takenOver` 只是进程内的布尔值，管不住别的会话。跨会话靠 `src/lock.ts` 的锁文件（按 `clientId` 分片、PID + 心跳双重存活判定、token 防止误删）。语义上**后来者赢**：这正是用户敲 `/dingtalk takeover` 时想表达的意思；旧持有者在一个心跳周期内自己让位，所以两个连接不会长期并存。
+- **接管是抢占式的，靠锁兜底**：`takenOver` 只是进程内的布尔值，管不住别的会话。跨会话靠 `src/core/lock.ts` 的锁文件（按 `clientId` 分片、PID + 心跳双重存活判定、token 防止误删）。语义上**后来者赢**：这正是用户敲 `/dingtalk takeover` 时想表达的意思；旧持有者在一个心跳周期内自己让位，所以两个连接不会长期并存。
 - **通知带会话标识**：每条通知的落款是 `omp · <目录名>·<4位短码> · HH:MM:SS`，审批这类没有落款的消息会多一行 `来自`。多个会话（或多台机器）共用一个钉钉账号时才分得清是谁在说话。
 
 ---
@@ -481,7 +488,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 247 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
+- `test/smoke.ts` — 254 项断言，全部 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -549,7 +556,7 @@ bun run lint        # oxlint（0 警告）
 
 **入站 Stream 共用（更严重）** — 同一个应用的多个 Stream 连接同时在线时，钉钉把消息推给哪个连接是不确定的。你在群里发「停止」，可能被 A 机器收到也可能被 B 机器收到——**你想停的那台很可能根本没收到**。
 
-插件对此的防护是**一台机器内**的：同一台机器上多个会话共用一套凭据时，接管锁（`src/lock.ts`）保证只有一个会话真正连着入站通道，后来者抢占、旧会话自动让位。但**锁文件是本地的**，跨机器它管不到——两台机器共用一套凭据时，仍然是上面说的掷硬币。所以跨机器必须各自建应用，不能靠这个锁兜底。
+插件对此的防护是**一台机器内**的：同一台机器上多个会话共用一套凭据时，接管锁（`src/core/lock.ts`）保证只有一个会话真正连着入站通道，后来者抢占、旧会话自动让位。但**锁文件是本地的**，跨机器它管不到——两台机器共用一套凭据时，仍然是上面说的掷硬币。所以跨机器必须各自建应用，不能靠这个锁兜底。
 
 推荐做法：
 
