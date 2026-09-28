@@ -395,8 +395,13 @@ export class QuestionRegistry {
 		// oxlint-disable-next-line no-useless-spread
 		for (const entry of [...this.#pending.values()]) {
 			this.#log.info(`远程提问 ${entry.id} 因 ${reason} 取消`);
+			// Settle with an empty answer: the racer treats it as "nobody
+			// answered" (closes the local dialog, hands the decision back to
+			// the model). Deliberately NOT calling onTimeout here — this is a
+			// cancellation, not a timeout, and onTimeout would push a bogus
+			// "question timed out" notification (see ApprovalRegistry.clear,
+			// which likewise skips onExpired).
 			entry.settle({ id: entry.id, items: [], answeredBy: "", raw: "" });
-			entry.onTimeout(entry);
 		}
 		this.#pending.clear();
 		this.#latest = undefined;
