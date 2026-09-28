@@ -2189,6 +2189,84 @@ console.log("\n[37] 多机器人：robots 映射解析 + takeover <name> 切换�
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
+console.log("\n[36] 回归：无待审批时，审批关键词不再吞掉待回答的提问");
+{
+	// Bug: "同意/yes/ok/…" used to be routed to #handleApproval unconditionally.
+	// With a pending question and no pending approval, the user got
+	// "⚠️ 没有匹配的审批" and the question was never answered. Approval words
+	// now only act as approval commands while an approval is actually pending.
+	// Take over explicitly: earlier sections may have left the main bridge
+	// released, and without a takeover the ask below would fall back to the
+	// local-only dialog (which the mock never answers → hang). Release first
+	// so takeover opens a FRESH stream: MockSocket.instances is global and
+	// later sections imported fresh modules, so at(-1) is only guaranteed to
+	// be this bridge's socket right after it (re)connects.
+	await commands.get("dingtalk").handler("release", ctx);
+	const socketsBefore = MockSocket.instances.length;
+	await commands.get("dingtalk").handler("takeover", ctx);
+	check("takeover 后主桥建了新的入站连接", await waitFor(() => MockSocket.instances.length > socketsBefore), MockSocket.instances.length - socketsBefore);
+	const liveNow = MockSocket.instances.at(-1)!;
+
+	const askTool = tools.get("ask");
+	const q = { id: "kw1", question: "今晚发版吗？", options: [{ label: "发" }, { label: "不发" }] };
+	const callsBefore = localAskCalls.length;
+	const postsBefore = questionPosts().length;
+	const repliesBefore = sessionReplies().length;
+	const pending = askTool.execute("t-ask-keyword", { questions: [q] }, undefined, undefined, ctx);
+	check(
+		"提问已发出（钉钉收到卡片）",
+		await waitFor(() => questionPosts().length > postsBefore),
+		questionPosts().length - postsBefore,
+	);
+	await waitFor(() => localAskCalls.length > callsBefore);
+
+	// Guard against hanging forever if the router still swallows the answer:
+	// in the buggy version this message went to #handleApproval and the ask
+	// never resolved.
+	liveNow.robot("同意");
+	const result = await Promise.race([pending, tick(3_000).then(() => "TIMEOUT")]);
+	check("「同意」没有卡住 ask 调用", result !== "TIMEOUT", result === "TIMEOUT" ? "ask 未返回（仍被审批分支吞掉）" : undefined);
+	check("「同意」被当作提问的自定义回答", (result as any)?.details?.customInput === "同意", (result as any)?.details);
+	const newReplies = sessionReplies().slice(repliesBefore);
+	check(
+		"没有回复「没有匹配的审批」",
+		!newReplies.some((r) => String(r.body?.markdown?.title ?? "").includes("没有匹配的审批")),
+		newReplies.map((r) => r.body?.markdown?.title),
+	);
+}
+
+console.log("\n[37] 回归：release/退出时取消提问，不再误报「提问超时」");
+{
+	// Bug: QuestionRegistry.clear() called onTimeout after settling, so
+	// /dingtalk release (and session shutdown) pushed a bogus "提问超时" card.
+	// Cancellation must settle the racer (turn unblocks, model decides) without
+	// the timeout notification — mirroring ApprovalRegistry.clear, which
+	// deliberately skips onExpired.
+	const askTool = tools.get("ask");
+	const q = { id: "rel1", question: "release 时会误报超时吗？", options: [{ label: "会" }, { label: "不会" }] };
+	const callsBefore = localAskCalls.length;
+	const postsBefore = questionPosts().length;
+	const pending = askTool.execute("t-ask-release", { questions: [q] }, undefined, undefined, ctx);
+	check(
+		"提问已发出（钉钉收到卡片）",
+		await waitFor(() => questionPosts().length > postsBefore),
+		questionPosts().length - postsBefore,
+	);
+	await waitFor(() => localAskCalls.length > callsBefore);
+
+	const timeoutsBefore = questionTimeoutPosts().length;
+	await commands.get("dingtalk").handler("release", ctx);
+	const result = await Promise.race([pending, tick(3_000).then(() => "TIMEOUT")]);
+	check("release 后 ask 调用正常返回（turn 不卡住）", result !== "TIMEOUT" && (result as any)?.details?.timedOut === true, (result as any)?.details);
+	// Let the (now quiet) sender queue drain before counting.
+	await tick(300);
+	check(
+		"release 没有推送虚假的「提问超时」卡片",
+		questionTimeoutPosts().length === timeoutsBefore,
+		questionTimeoutPosts().length - timeoutsBefore,
+	);
+}
+
 // --- summary ----------------------------------------------------------------
 console.log(`\n${"=".repeat(56)}`);
 if (failures.length === 0) {

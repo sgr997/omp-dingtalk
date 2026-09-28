@@ -125,7 +125,13 @@ export class CommandRouter {
 		const rest = tail.join(" ").trim();
 
 		try {
-			if (APPROVE_WORDS.has(word) || DENY_WORDS.has(word)) {
+			// Approval keywords only act as approval commands while an approval is
+			// actually pending. Otherwise a natural question answer like "同意" /
+			// "yes" would be swallowed here ("没有匹配的审批") and never reach the
+			// pending question below. When both are pending, approvals win: that
+			// ambiguity must resolve fail-closed, never auto-approve.
+			const hasPendingApprovals = this.#deps.approvals.size > 0;
+			if ((APPROVE_WORDS.has(word) || DENY_WORDS.has(word)) && hasPendingApprovals) {
 				await this.#handleApproval(message, word, rest);
 				return;
 			}
