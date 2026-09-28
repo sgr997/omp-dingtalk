@@ -1,6 +1,6 @@
 {
   "name": "omp-dingtalk",
-  "version": "0.1.0",
+  "version": "0.2.0-pre",
   "private": true,
   "description": "DingTalk bridge for OMP — push session notifications to DingTalk and control a running coding session from your phone.",
   "type": "module",

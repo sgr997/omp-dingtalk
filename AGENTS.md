@@ -73,7 +73,7 @@
 omp plugin link <插件绝对路径>
 ```
 
-验证（期望无 error、列表里有 `omp-dingtalk@0.1.0`）：
+验证（期望无 error，列表里有 `omp-dingtalk`，版本号与你装的 release 一致）：
 ```bash
 omp plugin doctor
 omp plugin list
