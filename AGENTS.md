@@ -156,7 +156,7 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 规则（agent 按这些引导，别让用户自己研究）：
 - 命名机器人只写自己不同的字段，其余继承全局设置；机器人名不能叫 `default`。
-- 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 只解除控制、不换机器人。
+- 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 解除接管的同时回到 `default` 机器人。
 - 锁按 `stream.clientId` 隔离：会话 A 接管 `home`、会话 B 接管 `work` 互不冲突，可以同时远程控制；两个会话抢同一个机器人，后来者赢。
 - 通知、审批、提问澄清都从**当前接管的机器人**发，没接管时发 `default`。
 - `control.allowUserId` 可以每个机器人不同，把不同机器人交给不同人管。
@@ -170,7 +170,7 @@ cd <插件绝对路径>
 bun run doctor
 ```
 
-它会：读配置 → **真发一条测试消息**（群/单聊）→ **真连 Stream**。失败时自动翻译钉钉错误码（`310000` 加签/关键词错、`300001` token 失效、`410100` 限流、`403` direct 缺权限/收件人不可见）。
+它会：读配置 → **真发一条测试消息**（群/单聊）→ **真连 Stream**。失败时自动翻译钉钉错误码（`310000` 加签/关键词错、`300001`/`300005` token 失效或机器人被移除、`410100` 限流）。
 
 **关键理解**：`doctor` 全绿只代表"能发出去、能连上"，不代表"能收到消息"。钉钉不保证推 `REGISTERED` 帧，连上没收到不代表坏。**最终验证入站**用：
 
