@@ -532,7 +532,8 @@ export class Bridge<P extends PlatformConfig> {
 			try {
 				this.#onLockTick();
 			} catch (error) {
-				this.log.error("接管锁心跳异常", error);
+				this.log.error("接管锁心跳异常，已关闭入站 Stream", error);
+				this.release();
 			}
 		}, heartbeatMs());
 		this.#lockTimer.unref?.();
@@ -602,7 +603,10 @@ export class Bridge<P extends PlatformConfig> {
 		}
 		const already = this.takenOver;
 		const acquired = this.#ensureLock().acquire(this.cwd);
-		if (!acquired.ok) return { ok: false, reason: acquired.error };
+		if (!acquired.ok) {
+			this.release();
+			return { ok: false, reason: acquired.error };
+		}
 
 		this.takenOver = true;
 		this.#startLockHeartbeat();

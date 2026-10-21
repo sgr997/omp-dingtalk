@@ -24,7 +24,7 @@
  * independent Stream subscriptions and must not block each other.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Logger } from "./logger";
 import { homeDir } from "./util";
@@ -120,13 +120,42 @@ export class TakeoverLock {
 	/** Who holds the lock right now, which may well be another process. */
 	readOwner(): LockHolder | undefined {
 		try {
-			if (!existsSync(this.#path)) return undefined;
-			const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as LockHolder;
-			return parsed && typeof parsed.pid === "number" ? parsed : undefined;
+			return this.#readOwnerStrict();
 		} catch (error) {
 			this.#log.debug("读取接管锁失败", error);
 			return undefined;
 		}
+	}
+
+	/** Distinguish a missing lock from one that cannot be read safely. */
+	#readOwnerStrict(): LockHolder | undefined {
+		let contents: string;
+		try {
+			contents = readFileSync(this.#path, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(contents);
+		} catch {
+			throw new Error("接管锁文件格式无效");
+		}
+		if (
+			!parsed ||
+			typeof parsed !== "object" ||
+			typeof (parsed as LockHolder).token !== "string" ||
+			typeof (parsed as LockHolder).pid !== "number" ||
+			typeof (parsed as LockHolder).cwd !== "string" ||
+			typeof (parsed as LockHolder).appKeyHint !== "string" ||
+			typeof (parsed as LockHolder).startedAt !== "number" ||
+			typeof (parsed as LockHolder).heartbeatAt !== "number"
+		) {
+			throw new Error("接管锁文件格式无效");
+		}
+		return parsed as LockHolder;
 	}
 
 	/**
@@ -138,7 +167,13 @@ export class TakeoverLock {
 	 * holder does not count — with nobody heartbeating, the channel is free.
 	 */
 	heldByOther(): boolean {
-		const owner = this.readOwner();
+		let owner: LockHolder | undefined;
+		try {
+			owner = this.#readOwnerStrict();
+		} catch (error) {
+			this.#log.debug("读取接管锁失败，按已占用处理", error);
+			return true;
+		}
 		if (!owner) return false;
 		if (this.#held && owner.token === this.#token) return false;
 		if (!isAlive(owner.pid)) return false;
@@ -150,7 +185,13 @@ export class TakeoverLock {
 	 * that is the point of the preemptive design.
 	 */
 	acquire(cwd: string): AcquireResult {
-		const existing = this.readOwner();
+		let existing: LockHolder | undefined;
+		try {
+			existing = this.#readOwnerStrict();
+		} catch (error) {
+			this.#log.warn("无法安全读取接管锁，拒绝接管", error);
+			return { ok: false, error: "无法安全读取接管锁文件；为避免多个会话同时连接，已拒绝接管" };
+		}
 		const now = Date.now();
 		let previous: LockHolder | undefined;
 
@@ -167,7 +208,11 @@ export class TakeoverLock {
 		this.#cwd = cwd;
 		this.#startedAt = now;
 		this.#held = true;
-		this.#write();
+		if (!this.#write()) {
+			this.#held = false;
+			this.#token = "";
+			return { ok: false, error: "无法写入接管锁文件；请检查锁目录权限" };
+		}
 
 		return { ok: true, previous };
 	}
@@ -179,13 +224,13 @@ export class TakeoverLock {
 	heartbeat(): LockHolder | undefined {
 		if (!this.#held) return undefined;
 
-		const owner = this.readOwner();
+		const owner = this.#readOwnerStrict();
 		if (!owner) {
 			// The file was removed out from under us (manual delete, or a race with
 			// someone else's release). Claim it again rather than silently dropping
 			// control — nothing else is holding it.
 			this.#log.debug("接管锁文件丢失，重新写入");
-			this.#write();
+			if (!this.#write()) throw new Error("无法重新写入接管锁");
 			return undefined;
 		}
 		if (owner.token !== this.#token) {
@@ -193,7 +238,7 @@ export class TakeoverLock {
 			return owner;
 		}
 
-		this.#write();
+		if (!this.#write()) throw new Error("无法续期接管锁");
 		return undefined;
 	}
 
@@ -202,16 +247,18 @@ export class TakeoverLock {
 		if (!this.#held) return;
 		this.#held = false;
 		try {
-			const owner = this.readOwner();
-			// Never delete a lock a preemptor has already taken.
-			if (owner && owner.token !== this.#token) return;
+			const owner = this.#readOwnerStrict();
+			// Never delete a lock a preemptor has already taken, or one whose owner
+			// cannot be verified.
+			if (!owner || owner.token !== this.#token) return;
 			rmSync(this.#path, { force: true });
 		} catch (error) {
 			this.#log.debug("释放接管锁失败", error);
 		}
 	}
 
-	#write(): void {
+	#write(): boolean {
+		let tempPath: string | undefined;
 		try {
 			mkdirSync(lockDir(), { recursive: true });
 			const holder: LockHolder = {
@@ -222,11 +269,20 @@ export class TakeoverLock {
 				startedAt: this.#startedAt,
 				heartbeatAt: Date.now(),
 			};
-			writeFileSync(this.#path, `${JSON.stringify(holder, null, 2)}\n`);
+			tempPath = `${this.#path}.${process.pid}.${this.#token}.tmp`;
+			writeFileSync(tempPath, `${JSON.stringify(holder, null, 2)}\n`, { flag: "wx" });
+			renameSync(tempPath, this.#path);
+			return true;
 		} catch (error) {
-			// A lock we cannot persist must not crash the session; the stream is
-			// still guarded by `takenOver` inside this process.
+			if (tempPath) {
+				try {
+					rmSync(tempPath, { force: true });
+				} catch {
+					// Preserve the original persistence error.
+				}
+			}
 			this.#log.warn("写入接管锁失败", error);
+			return false;
 		}
 	}
 }
