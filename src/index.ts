@@ -263,8 +263,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				}
 			}
 			const b = ensure(ctx?.cwd ?? process.cwd());
-			if (incomingId) b.sessionId = incomingId;
-			b.ctx = ctx;
+			b.bindSession(incomingId, ctx);
 			b.refreshConfig();
 			b.runStartedAt = Date.now();
 			b.awaitingRun = false;
@@ -413,6 +412,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						title: "omp 已退出",
 						text: `🔌 omp 已退出\n\n目录 \`${truncatePath(b.cwd, 120)}\``,
 						priority: "high",
+						isStillValid: b.captureSendValidity(),
 					}),
 					SHUTDOWN_SEND_TIMEOUT_MS,
 					{ ok: false },
@@ -450,6 +450,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				b.log.warn("审批模式为 remote 但钉钉尚未接管，无人能应答，本次不做远程拦截（执行 /dingtalk takeover 可开启）");
 				return undefined;
 			}
+			if (!b.canPush) return undefined;
 
 			const toolName = String(event?.toolName ?? "?");
 			const detail = describeToolCall(event);
@@ -487,7 +488,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 								detail,
 								timeoutMs: b.cfg.approval.timeoutMs,
 							}),
-							{ priority: "high", bypassQuiet: true },
+							{ priority: "high", bypassQuiet: true, isStillValid: () => b.approvals.has(a.id) },
 						);
 					}
 				},
@@ -624,14 +625,20 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					ctx?.ui?.notify?.("当前是子代理会话，钉钉由主会话负责。", "error");
 					return;
 				}
-				const b = ensure(ctx?.cwd ?? process.cwd());
-				b.ctx = ctx;
 				const [sub, ...rest] = String(args ?? "").trim().split(/\s+/);
 				const action = (sub ?? "").toLowerCase();
+				const takeover = action === "takeover" || action === "接管";
+				const foreign = isForeignSession(ctx);
+				if (foreign && !takeover && !["", "status", "help", "?"].includes(action)) {
+					ctx.ui?.notify?.("当前会话未持有钉钉接管；如需控制，请先执行 /dingtalk takeover。", "error");
+					return;
+				}
+				const b = foreign && !takeover && bridge ? bridge : ensure(ctx?.cwd ?? process.cwd());
+				if (!foreign && !takeover) b.ctx = ctx;
 
 				if (action === "takeover" || action === "接管") {
 					const robotName = (rest[0] ?? "").trim() || "default";
-					const result = b.takeOver(robotName);
+					const result = b.takeOver(robotName, { sessionId: sessionIdOf(ctx), ctx });
 					const hint = b.cfg.notify.onlyWhenTakenOver
 						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
 						: "";
@@ -698,6 +705,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						title: "omp 测试消息",
 						text: `## 👋 测试消息\n\n来自 \`${truncatePath(b.cwd, 120)}\`\n\n如果你看到这条消息，出站通道是通的。`,
 						priority: "high",
+						isStillValid: b.captureSendValidity({ bypassTakeover: true }),
 					});
 					ctx.ui?.notify?.(result.ok ? "已发送测试消息，请查看钉钉。" : `发送失败：${result.errmsg ?? "未知错误"}`, result.ok ? "info" : "error");
 					return;
@@ -789,6 +797,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					title: truncate(params?.title ?? "omp 通知", 60),
 					text: `${String(params?.message ?? "")}\n\n---\n<font color="#999999" size="1">来自 omp · ${truncatePath(b.cwd, 80)}</font>`,
 					priority: params?.urgency ?? "normal",
+					isStillValid: b.captureSendValidity(),
 				});
 				return {
 					content: [{ type: "text", text: result.ok ? "通知已发送到钉钉。" : `发送失败：${result.errmsg ?? "未知错误"}` }],

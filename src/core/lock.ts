@@ -38,6 +38,8 @@ export interface LockHolder {
 	appKeyHint: string;
 	startedAt: number;
 	heartbeatAt: number;
+	/** v2 claims renew a per-token lease; the shared claim is acquisition-only. */
+	lease?: boolean;
 }
 
 export interface AcquireResult {
@@ -117,6 +119,20 @@ export class TakeoverLock {
 		return this.#held;
 	}
 
+	/** Revalidate ownership at the boundary of an inbound/outbound side effect. */
+	isOwner(): boolean {
+		if (!this.#held) return false;
+		try {
+			return this.#readOwnerStrict()?.token === this.#token;
+		} catch {
+			return false;
+		}
+	}
+
+	#leasePath(token = this.#token): string {
+		return `${this.#path}.${token}.lease`;
+	}
+
 	/** Who holds the lock right now, which may well be another process. */
 	readOwner(): LockHolder | undefined {
 		try {
@@ -155,7 +171,20 @@ export class TakeoverLock {
 		) {
 			throw new Error("接管锁文件格式无效");
 		}
-		return parsed as LockHolder;
+		const holder = parsed as LockHolder;
+		if (!holder.lease) return holder; // Legacy lock files remain readable.
+		if (!/^[a-f0-9]{16}$/.test(holder.token)) throw new Error("接管锁 token 无效");
+		let lease: LockHolder;
+		try {
+			lease = JSON.parse(readFileSync(this.#leasePath(holder.token), "utf8")) as LockHolder;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
+		if (lease.token !== holder.token || lease.pid !== holder.pid || !Number.isFinite(lease.heartbeatAt)) {
+			throw new Error("接管续期文件格式无效");
+		}
+		return { ...holder, heartbeatAt: lease.heartbeatAt };
 	}
 
 	/**
@@ -204,15 +233,19 @@ export class TakeoverLock {
 			}
 		}
 
+		const oldToken = this.#token;
 		this.#token = randomBytes(8).toString("hex");
 		this.#cwd = cwd;
 		this.#startedAt = now;
 		this.#held = true;
-		if (!this.#write()) {
+		if (!this.#write(this.#leasePath()) || !this.#write(this.#path, true)) {
+			this.#removeLease();
+			if (oldToken) this.#removeLease(oldToken);
 			this.#held = false;
 			this.#token = "";
 			return { ok: false, error: "无法写入接管锁文件；请检查锁目录权限" };
 		}
+		if (oldToken) this.#removeLease(oldToken);
 
 		return { ok: true, previous };
 	}
@@ -226,38 +259,36 @@ export class TakeoverLock {
 
 		const owner = this.#readOwnerStrict();
 		if (!owner) {
-			// The file was removed out from under us (manual delete, or a race with
-			// someone else's release). Claim it again rather than silently dropping
-			// control — nothing else is holding it.
-			this.#log.debug("接管锁文件丢失，重新写入");
-			if (!this.#write()) throw new Error("无法重新写入接管锁");
-			return undefined;
+			throw new Error("接管锁已丢失，必须重新显式接管");
 		}
 		if (owner.token !== this.#token) {
 			this.#held = false;
+			this.#removeLease();
 			return owner;
 		}
 
-		if (!this.#write()) throw new Error("无法续期接管锁");
+		// A preemptor may replace the shared claim after the read above. Updating
+		// only our unique lease can never overwrite that preemptor's claim.
+		if (!this.#write(this.#leasePath())) throw new Error("无法续期接管锁");
 		return undefined;
 	}
 
-	/** Give up the lock. Only removes the file while it is still ours. */
+	/** Revocation removes only this acquisition's lease, never the shared claim. */
 	release(): void {
-		if (!this.#held) return;
 		this.#held = false;
+		this.#removeLease();
+	}
+
+	#removeLease(token = this.#token): void {
+		if (!token) return;
 		try {
-			const owner = this.#readOwnerStrict();
-			// Never delete a lock a preemptor has already taken, or one whose owner
-			// cannot be verified.
-			if (!owner || owner.token !== this.#token) return;
-			rmSync(this.#path, { force: true });
+			rmSync(this.#leasePath(token), { force: true });
 		} catch (error) {
-			this.#log.debug("释放接管锁失败", error);
+			this.#log.warn("释放接管续期文件失败", error);
 		}
 	}
 
-	#write(): boolean {
+	#write(path: string, lease = false): boolean {
 		let tempPath: string | undefined;
 		try {
 			mkdirSync(lockDir(), { recursive: true });
@@ -268,10 +299,11 @@ export class TakeoverLock {
 				appKeyHint: this.#clientId.slice(0, 8),
 				startedAt: this.#startedAt,
 				heartbeatAt: Date.now(),
+				...(lease ? { lease: true } : {}),
 			};
-			tempPath = `${this.#path}.${process.pid}.${this.#token}.tmp`;
+			tempPath = `${path}.${process.pid}.${this.#token}.tmp`;
 			writeFileSync(tempPath, `${JSON.stringify(holder, null, 2)}\n`, { flag: "wx" });
-			renameSync(tempPath, this.#path);
+			renameSync(tempPath, path);
 			return true;
 		} catch (error) {
 			if (tempPath) {

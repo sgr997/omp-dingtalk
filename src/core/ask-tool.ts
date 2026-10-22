@@ -44,6 +44,7 @@ export interface AskToolResult {
 
 export interface AskRaceRequest {
 	questions: RemoteQuestion[];
+	signal?: AbortSignal;
 	/**
 	 * Run the native TUI dialog. Rejects (with an abort-shaped error) when the
 	 * signal fires, which is how the loser of the race is cancelled.
@@ -272,7 +273,7 @@ export function registerAskTool(pi: ExtensionAPI, getBridge: (ctx: any) => AskRa
 			if (bridge) {
 				const questions = extractAskQuestions(params);
 				if (questions) {
-					const raced = await bridge.runAskRace({ questions, runLocal });
+						const raced = await bridge.runAskRace({ questions, runLocal, signal });
 					if (raced) return raced;
 				}
 			}

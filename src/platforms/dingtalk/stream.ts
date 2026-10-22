@@ -94,6 +94,7 @@ export class DingTalkStream {
 	#url = "";
 	#stopped = true;
 	#connecting = false;
+	#generation = 0;
 	#attempts = 0;
 	#connectTimer: ReturnType<typeof setTimeout> | undefined;
 	#livenessTimer: ReturnType<typeof setInterval> | undefined;
@@ -127,7 +128,9 @@ export class DingTalkStream {
 	}
 
 	stop(): void {
+		this.#generation += 1;
 		this.#stopped = true;
+		this.#connecting = false;
 		this.#clearConnectTimer();
 		this.#clearLiveness();
 		const ws = this.#ws;
@@ -181,20 +184,22 @@ export class DingTalkStream {
 	async #connect(): Promise<void> {
 		if (this.#stopped || this.#connecting) return;
 		this.#connecting = true;
+		const generation = this.#generation;
 		this.#setStatus("connecting");
 		try {
 			const { endpoint, ticket } = await this.#getEndpoint();
-			if (this.#stopped) return;
+			if (this.#stopped || generation !== this.#generation) return;
 			this.#url = `${endpoint}?ticket=${ticket}`;
 			this.#open();
 		} catch (error) {
+			if (this.#stopped || generation !== this.#generation) return;
 			const message = error instanceof Error ? error.message : String(error);
 			this.#status.lastError = message;
 			this.#log.warn(`建立 Stream 连接失败: ${message}`);
 			this.#setStatus("reconnecting", message);
 			this.#scheduleReconnect();
 		} finally {
-			this.#connecting = false;
+			if (generation === this.#generation) this.#connecting = false;
 		}
 	}
 
@@ -213,6 +218,7 @@ export class DingTalkStream {
 		ws.onopen = () =>
 			guard(
 				() => {
+						if (this.#stopped || this.#ws !== ws) return;
 					this.#attempts = 0;
 					this.#log.info("Stream 已连接");
 					this.#setStatus("connected");
@@ -223,7 +229,9 @@ export class DingTalkStream {
 			);
 
 		ws.onmessage = (event: MessageEvent) =>
-			guard(() => this.#onFrame(event.data), this.#log, "onmessage");
+			guard(() => {
+				if (!this.#stopped && this.#ws === ws) this.#onFrame(event.data);
+			}, this.#log, "onmessage");
 
 		ws.onerror = () =>
 			guard(() => {
@@ -310,8 +318,12 @@ export class DingTalkStream {
 			return;
 		}
 
+		const generation = this.#generation;
+		const ws = this.#ws;
 		Promise.resolve()
-			.then(() => this.#opts.onMessage(message))
+			.then(() => {
+				if (!this.#stopped && generation === this.#generation && this.#ws === ws) return this.#opts.onMessage(message);
+			})
 			.catch((error) => this.#log.error("处理入站消息失败", error));
 	}
 

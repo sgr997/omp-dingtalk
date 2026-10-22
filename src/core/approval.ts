@@ -46,6 +46,10 @@ export class ApprovalRegistry {
 		return this.#pending.size;
 	}
 
+	has(id: string): boolean {
+		return this.#pending.has(id);
+	}
+
 	list(): PendingApproval[] {
 		return [...this.#pending.values()].map((entry) => publicApproval(entry));
 	}

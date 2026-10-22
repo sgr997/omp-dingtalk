@@ -386,6 +386,59 @@ export function robotNames(config: DingTalkConfig): string[] {
 	return ["default", ...Object.keys(config.robots ?? {}).filter((name) => name !== "default")];
 }
 
+/** Normalize both the default identity and every merged robot override. */
+function normalizeRobot(config: DingTalkConfig, warnings: string[]): void {
+	// Normalize a few fields that are easy to get subtly wrong in JSON.
+	config.webhook.url = String(config.webhook.url ?? "").trim();
+	config.webhook.secret = String(config.webhook.secret ?? "").trim();
+	config.webhook.keyword = String(config.webhook.keyword ?? "").trim();
+	config.stream.clientId = String(config.stream.clientId ?? "").trim();
+	config.stream.clientSecret = String(config.stream.clientSecret ?? "").trim();
+	config.stream.robotCode = String(config.stream.robotCode ?? "").trim();
+	// Migration: a single `allowUserId` replaced the old `allowUserIds` array and
+	// `outbound.directUserIds` (the allowlist now doubles as the push recipient).
+	// Read the old keys once so an existing config does not silently fail closed,
+	// and warn whenever they are still there — a file carrying both is half-migrated.
+	const legacyControl = config.control as unknown as Record<string, unknown>;
+	const legacyOutbound = config.outbound as unknown as Record<string, unknown>;
+	if (legacyControl.allowUserIds !== undefined || legacyOutbound.directUserIds !== undefined) {
+		const pick = (value: unknown): string =>
+			Array.isArray(value) ? String(value.find((v) => typeof v === "string" && v.trim()) ?? "").trim() : "";
+		let migrated = "";
+		if (!config.control.allowUserId) {
+			migrated = pick(legacyControl.allowUserIds) || pick(legacyOutbound.directUserIds);
+			if (migrated) config.control.allowUserId = migrated;
+		}
+		warnings.push(
+			migrated
+				? "旧版 control.allowUserIds / outbound.directUserIds 已迁移到 control.allowUserId（取第一个值）。请删掉旧字段。"
+				: config.control.allowUserId
+					? "配置里还留着旧版 control.allowUserIds / outbound.directUserIds，已被忽略；现在生效的是 control.allowUserId。请删掉旧字段。"
+					: "检测到旧版 control.allowUserIds / outbound.directUserIds，但里面没有可用的 ID；请把 /id 返回的 senderStaffId 填进 control.allowUserId。",
+		);
+	}
+	config.control.allowUserId = typeof config.control.allowUserId === "string" ? config.control.allowUserId.trim() : "";
+	// A typo in `outbound.mode` must not silently pick a transport for you.
+	const rawOutboundMode = config.outbound.mode as unknown;
+	if (typeof rawOutboundMode !== "string" || !(OUTBOUND_MODES as readonly string[]).includes(rawOutboundMode)) {
+		if (rawOutboundMode !== undefined) {
+			warnings.push(`outbound.mode 的值 ${JSON.stringify(rawOutboundMode)} 无效，已回退为 "webhook"（群机器人）。`);
+		}
+		config.outbound.mode = "webhook";
+	}
+
+	// A typo in `scope` must not silently widen (or narrow) who can command omp.
+	const rawScope = config.control.scope as unknown;
+	if (typeof rawScope !== "string" || !(SCOPES as readonly string[]).includes(rawScope)) {
+		if (rawScope !== undefined) {
+			warnings.push(`control.scope 的值 ${JSON.stringify(rawScope)} 无效，已回退为 "direct"（仅单聊）。`);
+		}
+		config.control.scope = "direct";
+	}
+	config.control.requireAt = config.control.requireAt !== false;
+	config.control.autoTakeover = config.control.autoTakeover === true;
+}
+
 /**
  * Resolve the effective configuration for a named robot.
  *
@@ -394,15 +447,20 @@ export function robotNames(config: DingTalkConfig): string[] {
  * webhook / stream / outbound / control. Shared session settings (`enabled`,
  * `notify`, `approval`, `question`, `quiet`) always come from the top level.
  */
-export function resolveRobotConfig(config: DingTalkConfig, name: string): DingTalkConfig {
+export function resolveRobotConfig(config: DingTalkConfig, name: string, warnings: string[] = []): DingTalkConfig {
 	if (name === "default" || !config.robots?.[name]) return config;
 	const robot: RobotConfig = config.robots[name]!;
-	return merge(config, {
+	const resolved = merge(config, {
 		webhook: robot.webhook,
 		stream: robot.stream,
 		outbound: robot.outbound,
 		control: robot.control,
 	}) as DingTalkConfig;
+	const normalizedWarnings: string[] = [];
+	normalizeRobot(resolved, normalizedWarnings);
+	warnings.push(...normalizedWarnings.map((warning) => `[机器人 ${name}] ${warning}`));
+	validateRobotTransport(resolved, name, warnings);
+	return resolved;
 }
 
 /**
@@ -468,13 +526,7 @@ export function loadConfig(cwd: string): LoadedConfig {
 		sources.push("environment");
 	}
 
-	// Normalize a few fields that are easy to get subtly wrong in JSON.
-	config.webhook.url = String(config.webhook.url ?? "").trim();
-	config.webhook.secret = String(config.webhook.secret ?? "").trim();
-	config.webhook.keyword = String(config.webhook.keyword ?? "").trim();
-	config.stream.clientId = String(config.stream.clientId ?? "").trim();
-	config.stream.clientSecret = String(config.stream.clientSecret ?? "").trim();
-	config.stream.robotCode = String(config.stream.robotCode ?? "").trim();
+	normalizeRobot(config, warnings);
 	config.approval.rules = Array.isArray(config.approval.rules) ? config.approval.rules : [];
 	config.question.enabled = config.question.enabled !== false;
 	const rawQuestionTimeout = config.question.timeoutMs as unknown;
@@ -482,48 +534,7 @@ export function loadConfig(cwd: string): LoadedConfig {
 		warnings.push("question.timeoutMs 无效，已回退为 600000（10 分钟）。");
 		config.question.timeoutMs = 600_000;
 	}
-	// Migration: a single `allowUserId` replaced the old `allowUserIds` array and
-	// `outbound.directUserIds` (the allowlist now doubles as the push recipient).
-	// Read the old keys once so an existing config does not silently fail closed,
-	// and warn whenever they are still there — a file carrying both is half-migrated.
-	const legacyControl = config.control as unknown as Record<string, unknown>;
-	const legacyOutbound = config.outbound as unknown as Record<string, unknown>;
-	if (legacyControl.allowUserIds !== undefined || legacyOutbound.directUserIds !== undefined) {
-		const pick = (value: unknown): string =>
-			Array.isArray(value) ? String(value.find((v) => typeof v === "string" && v.trim()) ?? "").trim() : "";
-		let migrated = "";
-		if (!config.control.allowUserId) {
-			migrated = pick(legacyControl.allowUserIds) || pick(legacyOutbound.directUserIds);
-			if (migrated) config.control.allowUserId = migrated;
-		}
-		warnings.push(
-			migrated
-				? "旧版 control.allowUserIds / outbound.directUserIds 已迁移到 control.allowUserId（取第一个值）。请删掉旧字段。"
-				: config.control.allowUserId
-					? "配置里还留着旧版 control.allowUserIds / outbound.directUserIds，已被忽略；现在生效的是 control.allowUserId。请删掉旧字段。"
-					: "检测到旧版 control.allowUserIds / outbound.directUserIds，但里面没有可用的 ID；请把 /id 返回的 senderStaffId 填进 control.allowUserId。",
-		);
-	}
-	config.control.allowUserId = typeof config.control.allowUserId === "string" ? config.control.allowUserId.trim() : "";
 	config.notify.onlyWhenTakenOver = config.notify.onlyWhenTakenOver === true;
-
-	// A typo in `outbound.mode` must not silently pick a transport for you.
-	const rawOutboundMode = config.outbound.mode as unknown;
-	if (typeof rawOutboundMode !== "string" || !(OUTBOUND_MODES as readonly string[]).includes(rawOutboundMode)) {
-		if (rawOutboundMode !== undefined) {
-			warnings.push(`outbound.mode 的值 ${JSON.stringify(rawOutboundMode)} 无效，已回退为 "webhook"（群机器人）。`);
-		}
-		config.outbound.mode = "webhook";
-	}
-
-	// A typo in `scope` must not silently widen (or narrow) who can command omp.
-	const rawScope = config.control.scope as unknown;
-	if (typeof rawScope !== "string" || !(SCOPES as readonly string[]).includes(rawScope)) {
-		if (rawScope !== undefined) {
-			warnings.push(`control.scope 的值 ${JSON.stringify(rawScope)} 无效，已回退为 "direct"（仅单聊）。`);
-		}
-		config.control.scope = "direct";
-	}
 	// A typo in `approval.mode` must not silently disable the approval gate —
 	// same treatment as scope / outbound.mode.
 	const rawApprovalMode = config.approval.mode as unknown;
@@ -533,15 +544,13 @@ export function loadConfig(cwd: string): LoadedConfig {
 		}
 		config.approval.mode = "off";
 	}
-	config.control.requireAt = config.control.requireAt !== false;
-	config.control.autoTakeover = config.control.autoTakeover === true;
 
 	// Validate the default robot's credentials, then each named robot on its
 	// own resolved copy (resolveRobotConfig deep-copies, so fixing a named
 	// robot's stream.enabled=false never mutates the shared config).
 	validateRobotTransport(config, "default", warnings);
 	for (const name of Object.keys(config.robots ?? {})) {
-		validateRobotTransport(resolveRobotConfig(config, name), name, warnings);
+		resolveRobotConfig(config, name, warnings);
 	}
 
 	// "Silent until takeover" plus a takeover that can never happen is permanently silent —

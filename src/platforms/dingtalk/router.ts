@@ -33,6 +33,8 @@ export interface RouterDeps {
 	statusLines: () => string[];
 	isQuiet: () => boolean;
 	setQuiet: (value: boolean) => void;
+	isStillValid?: () => boolean;
+	captureValidity?: () => () => boolean;
 }
 
 /** Words that must appear alone, so "stop the server" stays a prompt, not an abort. */
@@ -51,7 +53,19 @@ export class CommandRouter {
 		this.#deps = deps;
 	}
 
-	async handle(message: RobotMessage): Promise<void> {
+	async handle(message: RobotMessage, isStillValid: () => boolean = this.#deps.captureValidity?.() ?? (() => true)): Promise<void> {
+		// Each message keeps its own authority across awaits, even after the
+		// bridge replaces this router or releases the connection.
+		const request = new CommandRouter({ ...this.#deps, isStillValid });
+		await request.#handle(message);
+	}
+
+	#active(): boolean {
+		return this.#deps.isStillValid?.() ?? true;
+	}
+
+	async #handle(message: RobotMessage): Promise<void> {
+		if (!this.#active()) return;
 		const text = robotMessageText(message);
 		const { cfg, log } = this.#deps;
 
@@ -66,6 +80,7 @@ export class CommandRouter {
 		// can never command omp, no matter who is in it or how they phrase it.
 		const isGroup = message.conversationType === "2";
 		const scope = cfg.control.scope;
+		if (!["direct", "group", "all"].includes(scope)) return;
 		if (scope === "direct" && isGroup) {
 			log.debug("忽略群聊消息（control.scope = direct）", { conversationId: message.conversationId });
 			return;
@@ -213,6 +228,7 @@ export class CommandRouter {
 
 		// The model was told to stop and wait; hand it the decision so an
 		// approved call can be re-issued (and released by the registry).
+		if (!this.#active()) return;
 		this.#deps.pi.sendUserMessage(
 			formatApprovalInjection({ id: approval.id, toolName: approval.toolName, detail: approval.detail, approved: approve, by }),
 			{ deliverAs: "steer" },
@@ -297,6 +313,7 @@ export class CommandRouter {
 		// A dual-surface racer is holding the `ask` call open, and the answer
 		// becomes that call's own result — injecting it again would answer twice.
 		if (result.raced) return;
+		if (!this.#active()) return;
 
 		// Otherwise the model never saw a dialog at all, so deliver the answer as
 		// a fresh user message with the question and answer both in context.
@@ -322,7 +339,7 @@ export class CommandRouter {
 		// The emotion API uses the message's msgId/conversationId, which
 		// do not expire (unlike sessionWebhook), so it works on long sessions.
 		const emoji = idle ? "👀" : delivery === "steer" ? "⚡" : "📋";
-		const result = await this.#deps.sender.sendEmotion(message, emoji);
+		const result = await this.#deps.sender.sendEmotion(message, emoji, () => this.#active());
 		if (!result.ok) {
 			// Fallback to a reply card if the emotion API is unavailable.
 			const how = idle ? "已开始执行" : delivery === "steer" ? "已插入当前轮次（会打断）" : "已排队，等当前轮次结束";
@@ -337,6 +354,7 @@ export class CommandRouter {
 			return;
 		}
 		await this.#reply(message, fmtText("🗜 开始压缩上下文", instructions ? `说明：${truncate(instructions, 200)}` : "使用默认摘要提示词。"));
+		if (!this.#active()) return;
 		try {
 			await ctx.compact(instructions || undefined);
 		} catch (error) {
@@ -402,6 +420,7 @@ export class CommandRouter {
 
 	/** Prefer replying in the originating conversation; fall back to the group robot. */
 	async #reply(message: RobotMessage, payload: Message): Promise<void> {
+		if (!this.#active()) return;
 		const { sender, cfg, log } = this.#deps;
 		if (cfg.control.replyToSession && message.sessionWebhook) {
 			const result = await sender.replyToSession(
@@ -413,6 +432,7 @@ export class CommandRouter {
 			if (result.ok) return;
 			log.debug(`sessionWebhook 回复失败，回落到群机器人: ${result.errmsg}`);
 		}
-		await sender.send({ title: payload.title, text: payload.text, priority: "high" });
+		if (!this.#active()) return;
+		await sender.send({ title: payload.title, text: payload.text, priority: "high", isStillValid: () => this.#active() });
 	}
 }

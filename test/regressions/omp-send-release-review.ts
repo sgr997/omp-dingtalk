@@ -1,0 +1,14 @@
+import {mkdtempSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {tmpdir} from 'node:os';
+const scratch=mkdtempSync(join(tmpdir(),'omp-send-release-review-'));const config=join(scratch,'config.json');
+writeFileSync(config,JSON.stringify({webhook:{url:'https://mock.invalid/send'},stream:{enabled:true,clientId:'review-client',clientSecret:'review-secret'},control:{enabled:true,scope:'direct',allowUserId:'review-user',autoTakeover:false,replyToSession:false},notify:{onlyWhenTakenOver:true}}));
+process.env.OMP_DINGTALK_CONFIG=config;process.env.OMP_DINGTALK_LOCK_DIR=join(scratch,'locks');process.env.OMP_DINGTALK_MIN_GAP_MS='5';
+let unblock!:()=>void; const gate=new Promise<void>(r=>unblock=r);let first=true;const calls:any[]=[];
+const resp=(body:any)=>({ok:true,status:200,text:async()=>JSON.stringify(body),json:async()=>body});
+globalThis.fetch=(async(input:any,init:any)=>{const url=String(input);if(url.includes('gateway/connections/open'))return resp({endpoint:'wss://mock.invalid',ticket:'x'});calls.push({released:!b.takenOver,title:JSON.parse(init.body).markdown.title});if(first){first=false;await gate;}return resp({errcode:0});}) as any;
+class WS{readyState=1;onclose:any;constructor(_url:string){}send(){}close(){this.readyState=3;this.onclose?.()}}globalThis.WebSocket=WS as any;
+const {Bridge}=await import('../../src/core/bridge.ts');const {dingtalkAdapter}=await import('../../src/platforms/dingtalk/adapter.ts');
+const noop=()=>{};const b=new Bridge({sendUserMessage:noop,logger:{info:noop,debug:noop,warn:noop,error:noop}} as any,scratch,dingtalkAdapter);b.ctx={cwd:scratch,isIdle:()=>true} as any;
+b.takeOver();b.notify({title:'blocker',text:'blocker'});
+const reply=b.router.handle({text:'/status',raw:{conversationType:'1',senderStaffId:'review-user',text:{content:'/status'}}});
+console.log('queue before release:',b.sender.stats.queued);b.release();unblock();await reply;
+console.log('outbound requests:',JSON.stringify(calls));b.dispose('end');

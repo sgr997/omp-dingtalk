@@ -391,13 +391,13 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 | 会话崩溃 / 被强杀 | 锁里的 PID 已死，下一个 `takeover` 立即回收，不会被永久锁死 |
 | 进程活着但卡死（心跳停） | 超过 30 秒没心跳同样算失效，可被回收 |
 | 被抢的会话一直不关 | 最多晚一个心跳周期（默认 5 秒）才让位 |
-| 被抢的会话之后又 `release` | 不会误删新持有者的锁（只有锁还是自己的才会删） |
-| 手动删掉锁文件 | 持有者下一次心跳会重新写入，不会因此丢掉控制 |
+| 被抢的会话之后又 `release` | 只删除本次接管独有的续期文件，不会误删新持有者的锁 |
+| 手动删掉锁文件 | 持有者下一次心跳会释放接管；需要在目标会话重新执行 `/dingtalk takeover` |
 | 换工作目录 | 会释放接管（`dispose()` 的语义），终端里会明确告警 |
 
 > ⚠️ **锁是本地文件，只保护同一台机器。** 两台机器共用同一个钉钉应用凭据时，跨机器仍然会掷硬币——那种情况下必须各自建应用（见第 10 节）。
 
-心跳周期可以用 `OMP_DINGTALK_HEARTBEAT_MS` 调（毫秒，默认 5000，低于 50 会被忽略），锁文件位置可以用 `OMP_DINGTALK_LOCK_DIR` 覆盖（默认与 omp 的 agent 目录相同，即 `~/.omp/agent`）。锁文件形如 `dingtalk-takeover-<clientId 的 sha1 前 12 位>.json`，里面是持有者的 PID / 目录 / 心跳时间，`/dingtalk status` 的「接管锁」一行会显示当前状态。
+心跳周期可以用 `OMP_DINGTALK_HEARTBEAT_MS` 调（毫秒，默认 5000，低于 50 会被忽略），锁文件位置可以用 `OMP_DINGTALK_LOCK_DIR` 覆盖（默认与 omp 的 agent 目录相同，即 `~/.omp/agent`）。接管记录形如 `dingtalk-takeover-<clientId 的 sha1 前 12 位>.json`，包含 PID / 目录和接管 token，只有 takeover 会替换它。心跳更新独立的 `<记录文件>.<token>.lease`，release 只删除自己的续期文件。接管记录可能仍留在磁盘，没有对应续期文件时表示已释放；不要仅凭 `.json` 文件存在判断占用。`/dingtalk status` 的「接管锁」一行会显示实际状态。旧格式锁仍可读取；升级后请重启仍运行旧代码的 OMP 会话。
 
 ---
 
@@ -508,12 +508,14 @@ bun run doctor
 再跑单元/加载测试：
 
 ```bash
-bun run test        # 全量：smoke + 加载（smoke 纯 mock，加载需要本机已装 omp）
+bun run test        # 全量：状态回归 + smoke + 加载（加载需要本机已装 omp）
+bun run test:state  # 状态回归与双进程锁交错，不连接真实钉钉
 bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
 - `test/smoke.ts` — 全部使用 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
+- `test/state-regressions.test.ts`、`test/lifecycle-boundaries.test.ts`、`test/lock-concurrency.test.ts` — 覆盖 release 后旧入站/排队发送失效、旁观 status、跨会话审批、取消 ask 及排队提问、机器人凭据/scope 校验、token 身份及晚返回缓存、配置重载禁用控制，以及真实双进程中的锁心跳交错。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
 ---
@@ -535,7 +537,7 @@ bun run lint        # oxlint（0 警告）
 | 终端提示「接管已被另一个会话抢占」 | 有另一个会话在同一个钉钉应用上执行了 `/dingtalk takeover`。本会话已自动释放、Stream 已关闭，**不会再往钉钉推送**（钉钉只有一个出口，接管卡由抢走的一方发）。想抢回来就在本会话再敲一次 `/dingtalk takeover`；不想被抢，给每个会话配**不同的** `stream.clientId` |
 | `/dingtalk status` 显示「接管锁被其他会话占用」 | 说明那个会话还活着并持有锁。要么去那个会话 `release`，要么在本会话 `takeover` 直接抢。显示 PID 和目录，可以据此找到它 |
 | 崩溃后 takeover 说被占用 | 不该发生：锁里 PID 已死会立即回收，心跳超时 30 秒也会回收。若确实卡住，检查 `/dingtalk status` 里的锁文件路径，确认没有**同 PID 被复用**的进程 |
-| 锁文件在哪、能手动删吗 | 默认 `~/.omp/agent/dingtalk-takeover-<hash>.json`（`/dingtalk status` 会显示路径）。可以删——持有者下次心跳会重新写入，不会因此丢掉控制 |
+| 锁文件在哪、能手动删吗 | 默认 `~/.omp/agent/dingtalk-takeover-<hash>.json`。请优先使用 `/dingtalk release`。手动删除接管记录或对应 `.lease` 文件后，持有者下次心跳会关闭远控，须重新 `/dingtalk takeover` |
 | 连上了但一直没有 `registered` | 正常现象：钉钉不保证推这个帧。用 `bun run watch` 验证能否收到消息即可 |
 | 入站通道一直 `reconnecting` | 多为公司代理问题，给 omp 进程设 `HTTPS_PROXY` / `HTTP_PROXY`；`/dingtalk status` 会显示最近一次错误 |
 | 通知被静音了 | 钉钉里发 `/quiet off`，或看 `quiet` 配置项 |

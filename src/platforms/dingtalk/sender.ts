@@ -78,6 +78,7 @@ export class DingTalkSender {
 
 	#accessToken = "";
 	#accessTokenExpiresAt = 0;
+	#credentialGeneration = 0;
 
 	constructor(cfg: DingTalkConfig, logger: Logger) {
 		this.#cfg = cfg;
@@ -95,7 +96,22 @@ export class DingTalkSender {
 	 * queued *before* the reload can be delivered *after* one queued afterwards.
 	 */
 	updateConfig(cfg: DingTalkConfig): void {
+		if (cfg.stream.clientId !== this.#cfg.stream.clientId || cfg.stream.clientSecret !== this.#cfg.stream.clientSecret) {
+			this.#credentialGeneration += 1;
+			this.#accessToken = "";
+			this.#accessTokenExpiresAt = 0;
+		}
 		this.#cfg = cfg;
+	}
+
+	/** Settle invalid queued sends immediately, including during a cooldown. */
+	discardInvalidated(): void {
+		this.#queue = this.#queue.filter((item) => {
+			if (!item.opts.isStillValid || item.opts.isStillValid()) return true;
+			this.#dropped += 1;
+			item.resolve?.({ ok: false, dropped: true, errmsg: "通知状态已变化，已取消发送" });
+			return false;
+		});
 	}
 
 	/**
@@ -262,8 +278,8 @@ export class DingTalkSender {
 	}
 
 	/** Append `timestamp` + `sign` when a signing secret is configured. */
-	#signedUrl(): string {
-		const { url, secret } = this.#cfg.webhook;
+	#signedUrl(cfg = this.#cfg): string {
+		const { url, secret } = cfg.webhook;
 		if (!secret) return url;
 		try {
 			const timestamp = Date.now();
@@ -280,17 +296,20 @@ export class DingTalkSender {
 	}
 
 	/** "自定义关键词" mode requires the keyword to appear in the body. */
-	#applyKeyword(text: string): string {
-		const { keyword } = this.#cfg.webhook;
+	#applyKeyword(text: string, cfg = this.#cfg): string {
+		const { keyword } = cfg.webhook;
 		if (!keyword) return text;
 		return text.includes(keyword) ? text : `${keyword}\n${text}`;
 	}
 
 	async #deliver(opts: SendOptions): Promise<SendResult> {
+		const cfg = this.#cfg;
+		const valid = () => cfg === this.#cfg && (opts.isStillValid?.() ?? true);
 		const channels = this.#channels();
 		const results: SendResult[] = [];
-		if (channels.webhook) results.push(await this.#deliverWebhook(opts));
-		if (channels.direct) results.push(await this.#deliverDirect(opts));
+		if (!valid()) return { ok: false, dropped: true, errmsg: "发送状态已变化" };
+		if (channels.webhook) results.push(await this.#deliverWebhook(opts, cfg));
+		if (channels.direct && valid()) results.push(await this.#deliverDirect(opts, cfg, valid));
 		if (results.length === 0) {
 			return { ok: false, errmsg: "没有可用的出站通道（检查 outbound.mode 与凭据）" };
 		}
@@ -307,17 +326,17 @@ export class DingTalkSender {
 	}
 
 	/** Post into the group the custom robot lives in. */
-	async #deliverWebhook(opts: SendOptions): Promise<SendResult> {
-		const { url } = this.#cfg.webhook;
+	async #deliverWebhook(opts: SendOptions, cfg: DingTalkConfig): Promise<SendResult> {
+		const { url } = cfg.webhook;
 		if (!url) return { ok: false, errmsg: "未配置 webhook.url" };
 
-		const atMobiles = opts.atMobiles ?? this.#cfg.notify.atMobiles;
-		const atUserIds = opts.atUserIds ?? this.#cfg.notify.atUserIds;
-		const atAll = opts.atAll ?? this.#cfg.notify.atAll;
+		const atMobiles = opts.atMobiles ?? cfg.notify.atMobiles;
+		const atUserIds = opts.atUserIds ?? cfg.notify.atUserIds;
+		const atAll = opts.atAll ?? cfg.notify.atAll;
 
 		const body: Record<string, unknown> = {
 			msgtype: "markdown",
-			markdown: { title: opts.title, text: this.#applyKeyword(opts.text) },
+			markdown: { title: opts.title, text: this.#applyKeyword(opts.text, cfg) },
 		};
 		if (atAll || atMobiles.length > 0 || atUserIds.length > 0) {
 			body.at = {
@@ -328,7 +347,7 @@ export class DingTalkSender {
 		}
 
 		try {
-			const response = await fetch(this.#signedUrl(), {
+			const response = await fetch(this.#signedUrl(cfg), {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(body),
@@ -365,16 +384,17 @@ export class DingTalkSender {
 	 * The keyword is deliberately *not* applied here: it is a custom-robot
 	 * webhook security setting and would just prefix every DM with junk.
 	 */
-	async #deliverDirect(opts: SendOptions): Promise<SendResult> {
-		const { robotCode } = this.#cfg.stream;
-		const recipients = this.#recipients();
+	async #deliverDirect(opts: SendOptions, cfg: DingTalkConfig, valid: () => boolean): Promise<SendResult> {
+		const { robotCode } = cfg.stream;
+		const recipients = cfg.control.allowUserId ? [cfg.control.allowUserId] : [];
 		if (!robotCode) return { ok: false, errmsg: "单聊推送需要 stream.robotCode" };
 		if (recipients.length === 0) {
 			return { ok: false, errmsg: "单聊推送没有收件人（control.allowUserId 为空）" };
 		}
 
 		try {
-			const token = await this.#getAccessToken();
+			const token = await this.#getAccessToken(cfg);
+			if (!valid()) return { ok: false, dropped: true, errmsg: "发送状态已变化" };
 			if (!token) return { ok: false, errmsg: "获取 access_token 失败" };
 
 			const response = await fetch(OTO_MESSAGE_URL, {
@@ -433,9 +453,11 @@ export class DingTalkSender {
 	}
 
 	/** Cached app access_token, refreshed a minute before it expires. */
-	async #getAccessToken(): Promise<string> {
+	async #getAccessToken(cfg = this.#cfg): Promise<string> {
+		const generation = this.#credentialGeneration;
+		if (cfg.stream.clientId !== this.#cfg.stream.clientId || cfg.stream.clientSecret !== this.#cfg.stream.clientSecret) return "";
 		if (this.#accessToken && Date.now() < this.#accessTokenExpiresAt) return this.#accessToken;
-		const { clientId, clientSecret } = this.#cfg.stream;
+		const { clientId, clientSecret } = cfg.stream;
 		const response = await fetch("https://api.dingtalk.com/v1.0/oauth2/accessToken", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -443,6 +465,7 @@ export class DingTalkSender {
 			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
 		});
 		const payload = (await response.json()) as { accessToken?: string; expireIn?: number; message?: string };
+		if (generation !== this.#credentialGeneration) return "";
 		if (!payload.accessToken) {
 			this.#log.warn("获取 access_token 失败", payload);
 			return "";
@@ -468,15 +491,18 @@ export class DingTalkSender {
 		msgId?: string;
 		conversationId?: string;
 		robotCode?: string;
-	}, emoji: string): Promise<SendResult> {
+	}, emoji: string, isStillValid: () => boolean = () => true): Promise<SendResult> {
+		const cfg = this.#cfg;
+		if (!isStillValid()) return { ok: false, dropped: true, errmsg: "接管状态已变化" };
 		const msgId = message.msgId;
 		const conversationId = message.conversationId;
-		const robotCode = message.robotCode ?? this.#cfg.stream.robotCode;
+		const robotCode = message.robotCode ?? cfg.stream.robotCode;
 		if (!msgId || !conversationId || !robotCode) {
 			return { ok: false, errmsg: "缺少 msgId / conversationId / robotCode，无法发送表情" };
 		}
 		try {
-			const token = await this.#getAccessToken();
+			const token = await this.#getAccessToken(cfg);
+			if (cfg !== this.#cfg || !isStillValid()) return { ok: false, dropped: true, errmsg: "接管状态已变化" };
 			if (!token) return { ok: false, errmsg: "获取 access_token 失败" };
 			const response = await fetch("https://api.dingtalk.com/v1.0/robot/emotion/reply", {
 				method: "POST",

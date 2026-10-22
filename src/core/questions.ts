@@ -269,6 +269,10 @@ export class QuestionRegistry {
 		return this.#pending.size;
 	}
 
+	has(id: string): boolean {
+		return this.#pending.has(id);
+	}
+
 	list(): PendingQuestion[] {
 		return [...this.#pending.values()].map(
 			({ settle: _settle, onTimeout: _onTimeout, onSettled: _onSettled, ...rest }) => rest,

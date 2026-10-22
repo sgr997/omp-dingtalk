@@ -1475,7 +1475,7 @@ console.log("\n[25] 接管锁：同一个钉钉应用只允许一个活着的消
 
 	b.release();
 	other.release();
-	check("release 之后锁文件消失", !existsSync(b.path) && !existsSync(other.path));
+	check("release 之后不再有锁持有者", !b.readOwner() && !other.readOwner());
 }
 
 console.log("\n[26] 多会话抢占：新会话 takeover 覆盖旧会话");
@@ -1499,6 +1499,7 @@ console.log("\n[26] 多会话抢占：新会话 takeover 覆盖旧会话");
 	const lockRoot = process.env.OMP_DINGTALK_LOCK_DIR!;
 	const lockFor = (suffix: string): string | undefined =>
 		readdirSync(lockRoot)
+			.filter((f) => f.endsWith(".lease"))
 			.map((f) => join(lockRoot, f))
 			.find((p) => {
 				try {

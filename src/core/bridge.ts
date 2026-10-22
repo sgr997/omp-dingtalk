@@ -89,8 +89,8 @@ export class Bridge<P extends PlatformConfig> {
 
 	#pi: ApiLike;
 	#lastAssistantText = "";
-	/** Invalidates queued notifications when this bridge releases or disposes. */
-	#notificationGeneration = 0;
+	/** Invalidates callbacks, queued sends and requests when ownership changes. */
+	#generation = 0;
 	#lockClientId = "";
 	#lockTimer: ReturnType<typeof setInterval> | undefined;
 	/** Last inbound message — used to react with ✅/❌ on session_stop. */
@@ -109,7 +109,7 @@ export class Bridge<P extends PlatformConfig> {
 		this.cfg = this.loaded.config;
 		this.quiet = this.cfg.quiet;
 		this.log = createLogger((pi as unknown as { logger?: unknown }).logger);
-		// `approvals` outlives config reloads so in-flight requests are not lost.
+		// Registries are reused, but owner/config changes explicitly cancel entries.
 		this.approvals = new ApprovalRegistry(this.log);
 		this.questions = new QuestionRegistry(this.log);
 		this.sender = adapter.createSender(this.activeCfg, this.log);
@@ -136,6 +136,30 @@ export class Bridge<P extends PlatformConfig> {
 		return this.adapter.formatter;
 	}
 
+	/** Session identity and host context must move together. */
+	bindSession(id: string | undefined, ctx: CtxLike): void {
+		if (id && this.sessionId && id !== this.sessionId) this.release();
+		if (id) this.sessionId = id;
+		this.ctx = ctx;
+	}
+
+	/** Capture authority at submission time, then recheck just before a side effect. */
+	captureSendValidity(options: { bypassTakeover?: boolean } = {}): () => boolean {
+		const generation = this.#generation;
+		return () => generation === this.#generation && this.cfg.enabled &&
+			(!this.takenOver || this.lock?.isOwner() === true) && !this.channelHeldByOther &&
+			(options.bypassTakeover === true || !this.cfg.notify.onlyWhenTakenOver || this.takenOver);
+	}
+
+	#invalidate(reason: string): void {
+		this.#generation += 1;
+		this.approvals.clear(reason);
+		this.questions.clear(reason);
+		this.#lastInboundTarget = undefined;
+		this.hadError = false;
+		this.sender.discardInvalidated?.();
+	}
+
 	#buildRouter(): ChannelRouter {
 		return this.adapter.createRouter(this.activeCfg, {
 			log: this.log,
@@ -147,6 +171,10 @@ export class Bridge<P extends PlatformConfig> {
 			statusLines: () => this.statusLines(),
 			isQuiet: () => this.quiet,
 			setQuiet: (value) => this.setQuiet(value),
+			captureValidity: () => {
+				const valid = this.captureSendValidity();
+				return () => this.takenOver && valid();
+			},
 		});
 	}
 
@@ -165,32 +193,33 @@ export class Bridge<P extends PlatformConfig> {
 
 	/**
 	 * Re-read the config files. Editing `dingtalk.json` and starting a new
-	 * session picks the change up without restarting omp; the Stream connection
-	 * is only torn down when its own credentials changed.
+	 * session picks the change up without restarting omp. In-flight control is
+	 * invalidated and the connection is rebuilt against the effective config.
 	 */
 	refreshConfig(): boolean {
 		const next = this.adapter.loadConfig(this.cwd);
 		if (JSON.stringify(next.config) === JSON.stringify(this.cfg)) return false;
 
-		const streamChanged =
-			JSON.stringify(this.adapter.resolveRobot(next.config, this.activeRobotName).stream) !==
-			JSON.stringify(this.activeCfg.stream);
+		const wasTakenOver = this.takenOver;
+		this.stream?.stop();
+		this.stream = undefined;
 		if (this.cfg.quiet !== next.config.quiet) this.quiet = next.config.quiet;
 
 		this.loaded = next;
 		this.cfg = next.config;
+		this.#invalidate("配置变更");
 		// Reuse the sender: a new instance would reset the rate-limit window and
 		// race the old one's backlog, so messages could arrive out of order.
 		// Re-point it at the still-active robot, which may itself have moved.
 		this.sender.updateConfig(this.activeCfg);
 		this.router = this.#buildRouter();
 
-		if (streamChanged) {
-			this.stream?.stop();
-			this.stream = undefined;
-			// Reconnect with the new credentials only if control was already handed
-			// over — a config edit must not silently take over the session.
-			this.startStream();
+		if (wasTakenOver) {
+			const result = this.takeOver(this.activeRobotName);
+			if (!result.ok) {
+				this.log.warn(`配置变更后无法继续接管：${result.reason}`);
+				this.release();
+			}
 		}
 		this.log.info("配置已重新加载");
 		return true;
@@ -226,7 +255,8 @@ export class Bridge<P extends PlatformConfig> {
 		// The platform rejects an over-long message instead of delivering its head,
 		// so a long reply is sent as several messages rather than cut short.
 		// `maxTextChars` is the per-message budget, not the total.
-		const generation = this.#notificationGeneration;
+		const authorityValid = this.captureSendValidity(options);
+		const isStillValid = () => authorityValid() && (options.isStillValid?.() ?? true);
 		const chunks = splitMessage(message.text, this.cfg.notify.maxTextChars);
 		for (let i = 0; i < chunks.length; i++) {
 			const part = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
@@ -237,7 +267,7 @@ export class Bridge<P extends PlatformConfig> {
 				// Each chunk needs its own dedupe key, or the second one would
 				// be merged into the first and the rest of the reply lost.
 				dedupeKey: options.dedupeKey ? `${options.dedupeKey}#${i}` : undefined,
-				isStillValid: () => generation === this.#notificationGeneration,
+				isStillValid,
 			});
 		}
 	}
@@ -247,6 +277,7 @@ export class Bridge<P extends PlatformConfig> {
 		if (!this.cfg.enabled) return false;
 		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) return false;
 		if (this.channelHeldByOther) return false;
+		if (this.takenOver && !this.lock?.isOwner()) return false;
 		return this.sender.configured;
 	}
 
@@ -259,6 +290,7 @@ export class Bridge<P extends PlatformConfig> {
 		if (this.channelHeldByOther) {
 			return "通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 `/dingtalk takeover`。";
 		}
+		if (this.takenOver && !this.lock?.isOwner()) return "接管锁已失效，请重新执行 `/dingtalk takeover`。";
 		if (!this.sender.configured) {
 			return `当前没有可用的出站通道（outbound.mode = ${this.activeCfg.outbound?.mode ?? "?"}）。`;
 		}
@@ -316,8 +348,10 @@ export class Bridge<P extends PlatformConfig> {
 			this.log.warn("双端提问需要可用的出站通道，本次只走本地对话框");
 			return undefined;
 		}
+		if (!this.canPush) return undefined;
 		const questions = request.questions;
 		if (questions.length === 0) return undefined;
+		request.signal?.throwIfAborted();
 
 		const hash = hashQuestions(questions);
 		const timeoutMs = this.cfg.question.timeoutMs;
@@ -339,7 +373,8 @@ export class Bridge<P extends PlatformConfig> {
 				this.log.info(`远程提问 ${question.id} 已推送（本地对话框同时打开）`, { count: questions.length });
 				this.notify(
 					this.formatter.questionRequest({ id: question.id, questions, timeoutMs }),
-					{ priority: "high", bypassQuiet: true },
+					{ priority: "high", bypassQuiet: true,
+						isStillValid: () => !request.signal?.aborted && this.questions.has(question.id) },
 				);
 			},
 			duplicate: (existing) => {
@@ -359,48 +394,69 @@ export class Bridge<P extends PlatformConfig> {
 		if (reused) return undefined;
 
 		const localAbort = new AbortController();
-		const localPromise = request.runLocal(localAbort.signal).then(
+		let rejectAbort!: (reason: unknown) => void;
+		const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
+		const onAbort = () => {
+			rejectAbort(request.signal?.reason ?? new Error("Ask cancelled"));
+			localAbort.abort(request.signal?.reason);
+			this.questions.drop(pending.id, "会话操作已取消");
+			this.sender.discardInvalidated?.();
+		};
+		request.signal?.addEventListener("abort", onAbort, { once: true });
+		if (request.signal?.aborted) onAbort();
+		const localPromise = Promise.resolve().then(() => {
+			localAbort.signal.throwIfAborted();
+			return request.runLocal(localAbort.signal);
+		}).then(
 			(result) => ({ source: "local" as const, result }),
 			(error: unknown) => ({ source: "local-error" as const, error }),
 		);
 		const remotePromise = remoteAnswered.then((answer) => ({ source: "remote" as const, answer }));
 
-		const winner = await Promise.race([localPromise, remotePromise]);
+		try {
+			const winner = await Promise.race([localPromise, remotePromise, aborted]);
+			request.signal?.throwIfAborted();
 
-		if (winner.source === "local") {
-			// Someone at the terminal answered first. Retract the remote copy so
-			// a late reply cannot settle a question that is already closed.
-			if (this.questions.drop(pending.id, "已在本地 TUI 回答")) {
-				this.notify(
-					this.formatter.questionAnsweredLocally({ id: pending.id, questions }),
-					{ priority: "low", bypassQuiet: true },
-				);
+			if (winner.source === "local") {
+				// Someone at the terminal answered first. Retract the remote copy so
+				// a late reply cannot settle a question that is already closed.
+				if (this.questions.drop(pending.id, "已在本地 TUI 回答")) {
+					this.notify(
+						this.formatter.questionAnsweredLocally({ id: pending.id, questions }),
+						{ priority: "low", bypassQuiet: true },
+					);
+				}
+				this.log.info(`提问 ${pending.id} 已在本地 TUI 回答，撤回远程推送`);
+				return winner.result;
 			}
-			this.log.info(`提问 ${pending.id} 已在本地 TUI 回答，撤回远程推送`);
-			return winner.result;
-		}
 
-		if (winner.source === "local-error") {
-			// The local dialog was cancelled (Esc) or the whole turn was aborted.
-			// That is not an answer: drop the remote copy and surface the same
-			// error the native tool would have thrown.
-			this.questions.drop(pending.id, "本地对话框已取消");
-			throw winner.error;
-		}
+			if (winner.source === "local-error") {
+				// The local dialog was cancelled (Esc) or the whole turn was aborted.
+				// That is not an answer: drop the remote copy and surface the same
+				// error the native tool would have thrown.
+				this.questions.drop(pending.id, "本地对话框已取消");
+				throw winner.error;
+			}
 
-		if (winner.answer) {
-			// Remote answered first — close the local dialog.
+			if (winner.answer) {
+				// Remote answered first — close the local dialog.
+				localAbort.abort();
+				this.log.info(`提问 ${pending.id} 已在远程回答，关闭本地对话框`);
+				return buildRemoteAskResult(winner.answer);
+			}
+
+			// Empty settlement: the remote window elapsed with no answer. Close the
+			// local dialog too and hand the decision back to the model, so a turn can
+			// never stay blocked on a phone nobody is holding.
 			localAbort.abort();
-			this.log.info(`提问 ${pending.id} 已在远程回答，关闭本地对话框`);
-			return buildRemoteAskResult(winner.answer);
+			this.log.info(`提问 ${pending.id} 无人回答，交回模型自行决定`);
+			return buildAskTimeoutResult({ id: pending.id, questions, timeoutMs });
+		} finally {
+			request.signal?.removeEventListener("abort", onAbort);
+			localAbort.abort();
+			this.questions.drop(pending.id, "提问已结束");
+			this.sender.discardInvalidated?.();
 		}
-
-		// Empty settlement: the remote window elapsed with no answer. Close the
-		// local dialog too and hand the decision back to the model, so a turn can
-		// never stay blocked on a phone nobody is holding.
-		localAbort.abort();
-		this.log.info(`提问 ${pending.id} 无人回答，交回模型自行决定`);
-		return buildAskTimeoutResult({ id: pending.id, questions, timeoutMs });
 	}
 
 	/**
@@ -499,12 +555,17 @@ export class Bridge<P extends PlatformConfig> {
 			this.log.debug("尚未接管，跳过 Stream 建连");
 			return;
 		}
+		const generation = this.#generation;
+		const router = this.router;
+		const active = () => generation === this.#generation && this.takenOver && this.lock?.isOwner() === true;
 		this.stream = this.adapter.createStream(ac, this.log, {
 			onMessage: (message: InboundMessage) => {
+				if (!active()) return;
 				if (message.reactionTarget) this.#lastInboundTarget = message.reactionTarget;
-				void this.router.handle(message);
+				void router.handle(message, active).catch((error) => this.log.error("处理入站消息失败", error));
 			},
 			onStatus: (status: StreamStatus) => {
+				if (generation !== this.#generation || !this.takenOver) return;
 				this.streamStatus = status;
 			},
 		});
@@ -578,7 +639,7 @@ export class Bridge<P extends PlatformConfig> {
 	 * (rather than half-working) when the channel cannot actually be opened, so
 	 * the terminal gets a real reason.
 	 */
-	takeOver(name = "default"): { ok: boolean; reason?: string; preempted?: LockHolder } {
+	takeOver(name = "default", owner?: { sessionId?: string; ctx: CtxLike }): { ok: boolean; reason?: string; preempted?: LockHolder } {
 		if (!this.cfg.enabled) return { ok: false, reason: "插件被 `enabled: false` 关闭了" };
 		if (!this.robotNames.includes(name)) {
 			return { ok: false, reason: `没有叫 \`${name}\` 的机器人。可用: ${this.robotNames.join(" / ")}` };
@@ -596,10 +657,12 @@ export class Bridge<P extends PlatformConfig> {
 					: "缺少 stream.clientId / clientSecret（或 stream.enabled 为 false）",
 			};
 		}
+		if (this.takenOver && !this.lock?.isOwner()) this.release();
 		// Re-point at the requested robot, so the stream / lock below see the
 		// same config. A live stream belongs to the previous robot; drop it
 		// before opening the new one (startStream below restarts it).
-		if (name !== this.activeRobotName) {
+		if (name !== this.activeRobotName || (owner?.sessionId && this.sessionId && owner.sessionId !== this.sessionId)) {
+			this.release();
 			this.#setActiveRobot(name);
 			this.stream?.stop();
 			this.stream = undefined;
@@ -613,8 +676,18 @@ export class Bridge<P extends PlatformConfig> {
 		}
 
 		this.takenOver = true;
+		if (owner) {
+			if (owner.sessionId) this.sessionId = owner.sessionId;
+			this.ctx = owner.ctx;
+		}
 		this.#startLockHeartbeat();
-		this.startStream();
+		try {
+			this.startStream();
+			if (this.streamStatus.state === "error" || !this.stream) throw new Error(this.streamStatus.detail ?? "入站通道无法启动");
+		} catch (error) {
+			this.release();
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
 		if (!already) this.log.info("已接管本会话", { robot: name, scope: target.control.scope });
 		if (acquired.previous) {
 			this.log.warn(`已从另一个会话手里抢占接管：${acquired.previous.cwd} (PID ${acquired.previous.pid})`);
@@ -626,8 +699,8 @@ export class Bridge<P extends PlatformConfig> {
 	release(): { wasTakenOver: boolean } {
 		const wasTakenOver = this.takenOver;
 		// A delayed notification from this takeover must not outlive its release.
-		if (wasTakenOver) this.#notificationGeneration += 1;
 		this.takenOver = false;
+		this.#invalidate("已解除接管");
 		// Releasing control also unbinds the robot: with nothing taken over,
 		// notifications go through the default robot again (see activeCfg).
 		if (this.activeRobotName !== "default") this.#setActiveRobot("default");
@@ -639,19 +712,15 @@ export class Bridge<P extends PlatformConfig> {
 		}
 		this.streamStatus = { state: "idle", reconnects: this.streamStatus.reconnects };
 		// Nobody can answer them any more; resolving as deny is the safe default.
-		this.approvals.clear("已解除接管");
-		this.questions.clear("已解除接管");
 		if (wasTakenOver) this.log.info("已解除接管");
 		return { wasTakenOver };
 	}
 
 	dispose(reason: string): void {
-		this.#notificationGeneration += 1;
 		this.takenOver = false;
+		this.#invalidate(reason);
 		this.#stopLockHeartbeat();
 		this.lock?.release();
-		this.approvals.clear(reason);
-		this.questions.clear(reason);
 		if (this.stream) {
 			this.stream.stop();
 			this.stream = undefined;
@@ -674,7 +743,7 @@ export class Bridge<P extends PlatformConfig> {
 	async reactToLastInbound(emoji: string): Promise<void> {
 		if (!this.#lastInboundTarget) return;
 		if (!this.sender.sendEmotion) return;
-		const result = await this.sender.sendEmotion(this.#lastInboundTarget, emoji);
+		const result = await this.sender.sendEmotion(this.#lastInboundTarget, emoji, this.captureSendValidity());
 		if (!result.ok) this.log.debug(`表情回复失败：${result.errmsg}`);
 	}
 

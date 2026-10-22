@@ -1,0 +1,20 @@
+import {writeFileSync,mkdtempSync} from 'node:fs';
+const scratch=mkdtempSync('/tmp/omp-review-pending-');process.env.OMP_DINGTALK_CONFIG=scratch+'/config.json';process.env.OMP_DINGTALK_LOCK_DIR=scratch+'/locks';process.env.OMP_DINGTALK_MIN_GAP_MS='1';process.env.OMP_DINGTALK_MAX_PER_MIN='1000';
+writeFileSync(process.env.OMP_DINGTALK_CONFIG,JSON.stringify({webhook:{url:'https://oapi.dingtalk.com/robot/send?access_token=MOCK'},stream:{enabled:true,clientId:'review',clientSecret:'mock'},control:{allowUserId:'staff',autoTakeover:false},approval:{mode:'remote',timeoutMs:600000,onTimeout:'deny'}}));
+globalThis.fetch=(async (url:any)=>({ok:true,status:200,text:async()=>JSON.stringify(String(url).includes('/gateway/')?{endpoint:'wss://mock.invalid',ticket:'mock'}:{errcode:0}),json:async()=>({})})) as any;
+class WS{static instances:WS[]=[];readyState=1;onopen:any;onclose:any;onmessage:any;constructor(public url:any){WS.instances.push(this);queueMicrotask(()=>this.onopen?.())}send(){}close(){this.readyState=3;this.onclose?.()}}
+globalThis.WebSocket=WS as any;
+const {default:plugin}=await import('../../src/index.ts');
+const handlers=new Map<string,any>();let cmd:any;const injections:any[]=[];const notices:string[]=[];
+const schema=():any=>{const s:any={describe:()=>s,optional:()=>s,min:()=>s,default:()=>s};return s};
+const pi:any={logger:{debug(){},info(){},warn(){},error(){}},on:(n:any,f:any)=>handlers.set(n,f),registerCommand:(_n:any,c:any)=>cmd=c,registerTool(){},sendUserMessage:(...v:any[])=>injections.push(v),getSessionName:()=>'',zod:Object.fromEntries(['object','array','string','number','boolean','enum'].map(n=>[n,()=>schema()]))};
+plugin(pi);
+const ctx=(id:string):any=>({cwd:scratch,hasUI:true,mode:'tui',sessionManager:{getSessionId:()=>id,getBranch:()=>[]},ui:{notify:(m:string)=>notices.push(m)},isIdle:()=>true});const A=ctx('A'), B=ctx('B');
+await handlers.get('session_start')({},A);await cmd.handler('takeover',A);
+const input={command:'git push origin main'};const blockA=await handlers.get('tool_call')({toolName:'bash',input},A);
+await handlers.get('session_start')({},B);await cmd.handler('takeover',B);await cmd.handler('status',B);
+const status=notices.at(-1)||'';const socket=WS.instances.at(-1)!;
+socket.onmessage({data:JSON.stringify({type:'CALLBACK',headers:{messageId:'1'},data:JSON.stringify({conversationType:'1',senderStaffId:'staff',text:{content:'approve'}})})});
+await new Promise(r=>setTimeout(r,30));const blockB=await handlers.get('tool_call')({toolName:'bash',input},B);
+console.log(JSON.stringify({oldSessionBlocked:!!blockA?.block,newSessionPendingLine:status.split('\n').filter(l=>l.includes('待审批')||l.includes('桥绑定')),newSessionSameCallBlocked:!!blockB?.block,approvalInjectionCount:injections.length}));
+await cmd.handler('release',B);process.exit(0);

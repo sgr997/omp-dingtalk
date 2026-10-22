@@ -91,8 +91,12 @@ class AdapterSender implements ChannelSender {
 		return this.#inner.send(message as Parameters<DingTalkSender["send"]>[0]) as Promise<SendResult>;
 	}
 
-	sendEmotion(target: Record<string, unknown> | undefined, emoji: string): Promise<SendResult> {
-		return this.#inner.sendEmotion(target as Parameters<DingTalkSender["sendEmotion"]>[0], emoji);
+	discardInvalidated(): void {
+		this.#inner.discardInvalidated();
+	}
+
+	sendEmotion(target: Record<string, unknown> | undefined, emoji: string, isStillValid?: () => boolean): Promise<SendResult> {
+		return this.#inner.sendEmotion(target as Parameters<DingTalkSender["sendEmotion"]>[0], emoji, isStillValid);
 	}
 
 	/** Reply in the originating conversation (session webhook), used by the router. */
@@ -157,6 +161,7 @@ class AdapterRouter implements ChannelRouter {
 			statusLines: () => string[];
 			isQuiet: () => boolean;
 			setQuiet: (value: boolean) => void;
+			captureValidity: () => () => boolean;
 		},
 	) {
 		const routerDeps: RouterDeps = {
@@ -170,12 +175,13 @@ class AdapterRouter implements ChannelRouter {
 			statusLines: deps.statusLines,
 			isQuiet: deps.isQuiet,
 			setQuiet: deps.setQuiet,
+			captureValidity: deps.captureValidity,
 		};
 		this.#inner = new CommandRouter(routerDeps);
 	}
 
-	handle(message: InboundMessage): Promise<void> {
-		return this.#inner.handle(message.raw as RobotMessage);
+	handle(message: InboundMessage, isStillValid?: () => boolean): Promise<void> {
+		return this.#inner.handle(message.raw as RobotMessage, isStillValid);
 	}
 }
 

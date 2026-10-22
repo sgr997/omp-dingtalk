@@ -80,6 +80,8 @@ export interface NotifyOptions {
 	 * you believing the channel still drives this session.
 	 */
 	bypassTakeover?: boolean;
+	/** Request-specific lifetime, e.g. a question that has not been answered. */
+	isStillValid?: () => boolean;
 }
 
 /** Outbound half of a platform: serialized, rate-limited, coalescing. */
@@ -90,8 +92,9 @@ export interface ChannelSender {
 	updateConfig(config: unknown): void;
 	enqueue(message: Message & SendOptions): void;
 	send(message: Message & SendOptions): Promise<SendResult>;
+	discardInvalidated?(): void;
 	/** Best-effort reaction (✅/❌) to the most recent inbound message. */
-	sendEmotion?(target: Record<string, unknown> | undefined, emoji: string): Promise<SendResult>;
+	sendEmotion?(target: Record<string, unknown> | undefined, emoji: string, isStillValid?: () => boolean): Promise<SendResult>;
 }
 
 export type StreamState = "idle" | "connecting" | "connected" | "registered" | "reconnecting" | "stopped" | "error";
@@ -161,7 +164,7 @@ export interface ChannelFormatter {
 
 /** Everything the router needs from the platform to route inbound messages. */
 export interface ChannelRouter {
-	handle(message: InboundMessage): Promise<void>;
+	handle(message: InboundMessage, isStillValid?: () => boolean): Promise<void>;
 }
 
 /**
@@ -204,6 +207,7 @@ export interface ChannelAdapter<P extends PlatformConfig = PlatformConfig> {
 		statusLines: () => string[];
 		isQuiet: () => boolean;
 		setQuiet: (value: boolean) => void;
+		captureValidity: () => () => boolean;
 	}): ChannelRouter;
 	formatter: ChannelFormatter;
 }
