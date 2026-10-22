@@ -40,6 +40,8 @@ export class Bridge<P extends PlatformConfig> {
 	router: ChannelRouter;
 
 	quiet: boolean;
+	/** Explicit release suppresses new pushes until a successful local takeover. */
+	notificationsReleased = false;
 	/**
 	 * Whether the channel is currently allowed to drive this session.
 	 *
@@ -138,7 +140,10 @@ export class Bridge<P extends PlatformConfig> {
 
 	/** Session identity and host context must move together. */
 	bindSession(id: string | undefined, ctx: CtxLike): void {
-		if (id && this.sessionId && id !== this.sessionId) this.release();
+		if (id && this.sessionId && id !== this.sessionId) {
+			this.release();
+			this.notificationsReleased = false;
+		}
 		if (id) this.sessionId = id;
 		this.ctx = ctx;
 	}
@@ -147,6 +152,7 @@ export class Bridge<P extends PlatformConfig> {
 	captureSendValidity(options: { bypassTakeover?: boolean } = {}): () => boolean {
 		const generation = this.#generation;
 		return () => generation === this.#generation && this.cfg.enabled &&
+			(!this.notificationsReleased || options.bypassTakeover === true) &&
 			(!this.takenOver || this.lock?.isOwner() === true) && !this.channelHeldByOther &&
 			(options.bypassTakeover === true || !this.cfg.notify.onlyWhenTakenOver || this.takenOver);
 	}
@@ -233,6 +239,7 @@ export class Bridge<P extends PlatformConfig> {
 	/** Push a notification, honouring mute and the master switch. */
 	notify(message: Message, options: NotifyOptions = {}): void {
 		if (!this.cfg.enabled) return;
+		if (this.notificationsReleased) return;
 		// "Silent until takeover" outranks `bypassQuiet`: it is an explicit
 		// choice to have the channel say nothing until control was handed over, and
 		// approvals cannot happen in that state anyway (the gate stands down).
@@ -275,6 +282,7 @@ export class Bridge<P extends PlatformConfig> {
 	/** Whether an outbound push is allowed right now (takeover gate + config). */
 	get canPush(): boolean {
 		if (!this.cfg.enabled) return false;
+		if (this.notificationsReleased) return false;
 		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) return false;
 		if (this.channelHeldByOther) return false;
 		if (this.takenOver && !this.lock?.isOwner()) return false;
@@ -284,6 +292,7 @@ export class Bridge<P extends PlatformConfig> {
 	/** Why `canPush` is false, for the model-facing tool to relay. */
 	get pushBlockedReason(): string | undefined {
 		if (!this.cfg.enabled) return "插件被 `enabled: false` 关闭了。";
+		if (this.notificationsReleased) return "本会话已执行 `/dingtalk release`，自动推送已停止；重新 `/dingtalk takeover` 后恢复。";
 		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) {
 			return "配置为「接管前静默」（notify.onlyWhenTakenOver），需要先在 omp 里执行 `/dingtalk takeover`。";
 		}
@@ -496,22 +505,28 @@ export class Bridge<P extends PlatformConfig> {
 
 	setQuiet(value: boolean): void {
 		this.quiet = value;
+		this.#persistState();
+	}
+
+	#persistState(): void {
 		try {
-			this.#pi.appendEntry?.(STATE_ENTRY, { quiet: value });
+			this.#pi.appendEntry?.(STATE_ENTRY, { quiet: this.quiet, notificationsReleased: this.notificationsReleased });
 		} catch (error) {
-			this.log.debug("持久化静音状态失败", error);
+			this.log.debug("持久化通知状态失败", error);
 		}
 	}
 
-	/** Restore the persisted mute flag for the session being resumed. */
+	/** Old quiet-only entries remain valid; release is restored independently. */
 	restoreState(ctx: CtxLike & { sessionManager?: { getBranch?: () => unknown[] } }): void {
 		try {
 			const branch = ctx.sessionManager?.getBranch?.() ?? [];
-			for (const entry of branch as Array<{ type?: string; customType?: string; data?: { quiet?: boolean } }>) {
-				if (entry?.type === "custom" && entry.customType === STATE_ENTRY && typeof entry.data?.quiet === "boolean") {
-					this.quiet = entry.data.quiet;
-				}
+			for (const entry of branch as Array<{ type?: string; customType?: string; data?: { quiet?: boolean; notificationsReleased?: boolean } }>) {
+				if (entry?.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
+				if (typeof entry.data?.quiet === "boolean") this.quiet = entry.data.quiet;
+				if (typeof entry.data?.notificationsReleased === "boolean") this.notificationsReleased = entry.data.notificationsReleased;
 			}
+			if (this.notificationsReleased && this.takenOver) this.release();
+			this.sender.discardInvalidated?.();
 		} catch (error) {
 			this.log.debug("恢复静音状态失败", error);
 		}
@@ -520,7 +535,9 @@ export class Bridge<P extends PlatformConfig> {
 	statusLines(): string[] {
 		const stats = this.sender.stats;
 		const pending = this.approvals.size;
-		const inbound = !this.takenOver
+		const inbound = this.notificationsReleased
+			? "已释放 · 本会话入站连接已关闭，自动推送已停止"
+			: !this.takenOver
 			? "未接管 · 在 omp 里执行 `/dingtalk takeover` 后钉钉才能指挥本会话"
 			: this.streamStatus.state === "registered"
 				? "已接管（已连接）"
@@ -538,9 +555,10 @@ export class Bridge<P extends PlatformConfig> {
 			`- **单聊收件人**: ${this.sender.recipientCount} 人`,
 			`- **通知队列**: ${stats.queued} 待发 / 已发 ${stats.delivered} / 丢弃 ${stats.dropped} / 失败 ${stats.failed}`,
 			`- **钉钉接管**: ${inbound}`,
+			`- **自动推送**: ${this.notificationsReleased ? "已停止（release）；重新 takeover 后恢复" : this.canPush ? (this.quiet ? "已静音" : "按通知配置发送") : "未开启"}`,
 			lockLine,
 			this.sessionId ? `- **桥绑定会话**: ${this.sessionId}` : "- **桥绑定会话**: (未绑定)",
-			`- **入站通道**: ${this.streamStatus.state}${this.streamStatus.detail ? ` (${this.streamStatus.detail})` : ""} · 重连 ${this.streamStatus.reconnects} 次`,
+			`- **入站连接**: ${this.stream ? `${this.streamStatus.state}${this.streamStatus.detail ? ` (${this.streamStatus.detail})` : ""}` : "已关闭"} · 重连 ${this.streamStatus.reconnects} 次`,
 			`- **待审批**: ${pending}`,
 			`- **待回答提问**: ${this.questions.size}`,
 			`- **配置来源**: ${this.loaded.sources.join(" | ") || "(默认值)"}`,
@@ -688,6 +706,8 @@ export class Bridge<P extends PlatformConfig> {
 			this.release();
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+		this.notificationsReleased = false;
+		this.#persistState();
 		if (!already) this.log.info("已接管本会话", { robot: name, scope: target.control.scope });
 		if (acquired.previous) {
 			this.log.warn(`已从另一个会话手里抢占接管：${acquired.previous.cwd} (PID ${acquired.previous.pid})`);
@@ -696,8 +716,12 @@ export class Bridge<P extends PlatformConfig> {
 	}
 
 	/** Hand control back to the terminal and close the inbound channel. */
-	release(): { wasTakenOver: boolean } {
+	release(options: { stopNotifications?: boolean } = {}): { wasTakenOver: boolean } {
 		const wasTakenOver = this.takenOver;
+		if (options.stopNotifications) {
+			this.notificationsReleased = true;
+			this.#persistState();
+		}
 		// A delayed notification from this takeover must not outlive its release.
 		this.takenOver = false;
 		this.#invalidate("已解除接管");

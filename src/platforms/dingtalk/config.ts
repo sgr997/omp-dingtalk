@@ -585,7 +585,7 @@ export function describeConfig(loaded: LoadedConfig): string[] {
 		`加签密钥: ${mask(config.webhook.secret)}`,
 		`关键词: ${config.webhook.keyword || "(未设置)"}`,
 		`单聊收件人: ${config.control.allowUserId || "(空)"}`,
-		`入站 Stream: ${config.stream.enabled ? "已启用" : "未启用"} (clientId ${mask(config.stream.clientId)})`,
+		`入站 Stream 配置: ${config.stream.enabled ? "已启用（仅配置，不代表当前会话已接管）" : "未启用"} (clientId ${mask(config.stream.clientId)})`,
 		`控制范围: ${SCOPE_LABELS[config.control.scope] ?? config.control.scope}`,
 		`接管方式: ${config.control.autoTakeover ? "会话启动时自动接管" : "需在会话内执行 /dingtalk takeover"}`,
 		`审批模式: ${config.approval.mode}`,

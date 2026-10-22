@@ -51,7 +51,7 @@
     "atAll": false,
     "maxTextChars": 1800,
     "onlyWhenTakenOver": false,
-    "$comment_onlyWhenTakenOver": "true = 接管前完全静默：没执行 /dingtalk takeover 之前一条通知都不发（含错误告警和退出通知），接管后才开始发，release 后又停。注意它要求能接管（stream 凭据齐全），否则会永远收不到通知。"
+    "$comment_onlyWhenTakenOver": "true = 接管前完全静默：没执行 /dingtalk takeover 之前一条通知都不发（含错误告警和退出通知），接管后才开始发。false 允许首次未接管时发送通知。无论此值如何，显式 /dingtalk release 都停止本会话自动推送，直到再次成功 takeover。注意 true 要求能接管（stream 凭据齐全），否则会永远收不到通知。"
   },
 
   "approval": {

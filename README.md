@@ -213,7 +213,8 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 - `scope: "direct"` —— 群里 @ 机器人也**完全不响应**，只有单聊能指挥它。
 - `autoTakeover: false` —— 会话启动时**不会**自动连上入站通道，必须在 omp 里敲 `/dingtalk takeover` 才接通。已经接管的会话，新会话启动**不会**把它松开（接管是显式状态，只由 `/dingtalk takeover` 抢占或 `/dingtalk release` 主动解除）。
-- **接管会话是钉钉的唯一出口**：你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发——`onlyWhenTakenOver` 即使是 `false` 也一样。别的会话（旁观者）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，各会话按 `onlyWhenTakenOver` 正常发。
+- **接管会话是钉钉的唯一出口**：你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发——`onlyWhenTakenOver` 即使是 `false` 也一样。别的会话（旁观者）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，未显式 release 的会话按 `onlyWhenTakenOver` 正常发。此独占规则通过本地锁实现，不跨电脑。
+- **`/dingtalk release` 停止本会话的入站控制和自动推送**：即使 `onlyWhenTakenOver: false`，之后新产生的回复完成、错误、退出通知及模型通知工具也不会发送。重复 release 保持停止状态；`quiet off` 不会撤销它。该状态随本会话保存，恢复同一会话时不会被 `autoTakeover` 自动解除，直到再次成功执行 `/dingtalk takeover`。手动 `/dingtalk test` 仍可测试发送，但不会恢复自动推送。不同电脑上的其他会话不受影响。
 - `onlyWhenTakenOver: true` —— **接管前一条通知都不发**，接管后才开始发，`/dingtalk release` 之后又停。适合「坐在电脑前不想被打扰，出门前 takeover 一下」。
   - 它是**全有全无**的：空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
   - 要求**能**接管（`stream` 凭据齐全）。如果配了它却又无法接管，配置加载时会明确告警「一条通知也不会有」——这个组合是永久静默，最容易误判成「没问题」。
@@ -268,11 +269,11 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 }
 ```
 
-- **绑定**：会话默认绑 `default`；在 omp 里执行 `/dingtalk takeover <名字>` 就绑定并接管指定机器人（`/dingtalk takeover` 不带名字 = `default`）。`/dingtalk release` 解除接管，并回到默认机器人继续发通知。
+- **绑定**：会话默认绑 `default`；在 omp 里执行 `/dingtalk takeover <名字>` 就绑定并接管指定机器人（`/dingtalk takeover` 不带名字 = `default`）。`/dingtalk release` 解除接管、回到默认机器人，并停止本会话自动推送；不会因为回到默认机器人而继续推送。
 - **按应用凭据隔离**：接管锁按 `stream.clientId` 分片；只有 `home`、`work` 使用不同的 `clientId` 时，窗口 A、B 才能同时接管、互不抢占。若两个命名机器人复用同一个企业应用，它们共享同一把锁。
 - **谁管谁**：`control.allowUserId` 可以每个机器人不同——不同机器人交给不同人控制。通知、审批、提问都走当前接管的那个机器人。
 - `robots` 里的名字不能叫 `default`（那是顶层配置的保留名）。给不存在的名字执行 `takeover` 会被拒绝并列出可用项。
-- 多机器人一样适用「接管会话是唯一出口」：未接管时走默认机器人，接管后走被接管的机器人，旁观会话照常静默。
+- 多机器人一样适用「接管会话是唯一出口」：未显式 release 的会话在未接管时走默认机器人，接管后走被接管的机器人；显式 release 后停止本会话自动推送，旁观会话照常静默。
 
 ---
 
@@ -439,7 +440,7 @@ omp 的「提问」工具会在终端弹一个选择框并**卡住当前轮次**
 
 > 表情走钉钉企业应用的 `emotion/reply` 接口，**不过期**（不像 sessionWebhook）——长任务跑几十分钟，结尾的 ✅/❌ 照样打得到。表情接口不可用时自动回落到回复卡片。
 
-终端里还有个本地命令：`/dingtalk status | takeover [机器人名] | release | test | quiet on|off`。输入 `/dingtalk `（带空格）或前缀（如 `/dingtalk ta`）会弹出子命令补全，带中文说明；补全 `takeover` 后还会继续补全可用的机器人名。`/dingtalk status` 会显示当前绑定的机器人和全部可用机器人。
+终端里还有个本地命令：`/dingtalk status | takeover [机器人名] | release | test | quiet on|off`。输入 `/dingtalk `（带空格）或前缀（如 `/dingtalk ta`）会弹出子命令补全，带中文说明；补全 `takeover` 后还会继续补全可用的机器人名。`/dingtalk status` 首先显示当前会话是“已接管 / 未接管 / 已释放”，再显示实际入站连接、自动推送状态和机器人。配置中的“入站 Stream 已启用”只表示允许连接，不代表当前会话已接管。
 
 另外注册了一个 `dingtalk_notify` 工具，模型在任务跑完但你不确定用户还在不在时，可以自己主动推送一条通知。
 
@@ -525,6 +526,7 @@ bun run lint        # oxlint（0 警告）
 | 现象 | 排查 |
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
+| release 后仍每轮收到完成通知 | 旧代码在 `notify.onlyWhenTakenOver: false` 时只断开入站，不阻止随后新产生的通知。更新并重启 OMP 会话后，再执行 release；status 首行应显示“已释放”，实际入站连接“已关闭”，自动推送“已停止”。本机 release 不改变其他电脑的会话 |
 | 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
 | 接管成功、锁和 Stream 都正常，却一条都不推 | 同一个 omp 进程里先跑过别的会话（切会话 / 新建 / 恢复），桥的归属还停在那一个 session 上，于是接管会话自己的事件被当成「外来会话」过滤掉了。已在插件侧修好：顶层会话切换时桥自动改随新会话，接管成功时也会重新绑定；`autoTakeover = true` 时新会话「后来者覆盖」直接接管；子代理（无 UI 的 headless runner）依旧完全静默。**例外**：无 UI 的顶层会话（`omp -p` / ACP / SDK 这类 `rpc`/`json`/`print` 模式）与子代理在宿主暴露的字段上无法区分，不会被自动改绑——在这类会话里执行 `/dingtalk takeover` 即可接手。用 `/dingtalk status` 看「桥绑定会话」是否与当前会话一致，不一致时会直接给出提示。旧版遇到这个现象：退出重开该 omp 会话，或在本会话再执行一次 `/dingtalk takeover` |
 | 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |

@@ -89,6 +89,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 		/** Get (or lazily build) the bridge for a working directory. */
 		const ensure = (cwd: string): Bridge<DingTalkConfig> => {
 			if (bridge && bridge.cwd === cwd) return bridge;
+			const previous = bridge;
 			if (bridge) {
 				// `dispose()` releases the takeover lock, so a cwd change silently hands
 				// control back to the terminal. Say so — otherwise the channel just stops
@@ -97,6 +98,13 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				bridge.dispose("工作目录变更");
 			}
 			bridge = new Bridge(api, cwd || process.cwd(), dingtalkAdapter);
+			if (previous) {
+				// Rebuilding for a cwd change must preserve the current session's
+				// explicit stop. bindSession resets it if a different session arrives.
+				bridge.sessionId = previous.sessionId;
+				bridge.notificationsReleased = previous.notificationsReleased;
+				bridge.quiet = previous.quiet;
+			}
 			// The label lives in the platform formatter, which is shared by everything
 			// in this process. Only one bridge is ever live at a time (`dispose()`
 			// above), so re-asserting it here keeps the label pointing at the live
@@ -281,7 +289,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			// `/dingtalk takeover`. A takeover the user asked for is kept across
 			// session starts (autoTakeover=false must not silently drop it); the
 			// lock still arbitrates who actually holds the channel.
-			if (b.cfg.control.autoTakeover) {
+			if (b.cfg.control.autoTakeover && !b.notificationsReleased) {
 				const result = b.takeOver();
 				if (!result.ok) {
 					b.log.warn(`自动接管失败：${result.reason}`);
@@ -601,7 +609,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			const subs = [
 				{ value: "status", description: "会话 / 模型 / 待审批 / 发送队列 / 通道状态" },
 				{ value: "takeover", description: "让钉钉接管本会话（远程控制 + 审批），可指定机器人名" },
-				{ value: "release", description: "解除接管，关闭入站通道" },
+				{ value: "release", description: "解除本会话接管，关闭入站并停止自动推送" },
 				{ value: "test", description: "发一条测试通知到钉钉，确认能收到" },
 				{ value: "quiet", description: "静音开关：quiet on | quiet off" },
 				{ value: "help", description: "钉钉指令说明" },
@@ -677,9 +685,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				}
 
 				if (action === "release" || action === "解除") {
-					const { wasTakenOver } = b.release();
-					const tail = wasTakenOver && b.cfg.notify.onlyWhenTakenOver ? " 通知也一并停了。" : "";
-					ctx.ui?.notify?.(wasTakenOver ? `已解除钉钉接管，入站通道已关闭。${tail}` : "当前本来就没有接管。", "info");
+					const { wasTakenOver } = b.release({ stopNotifications: true });
+					ctx.ui?.notify?.(`${wasTakenOver ? "已解除钉钉接管" : "本会话已处于释放状态"}，入站连接已关闭，自动推送已停止；重新 /dingtalk takeover 后恢复。`, "info");
 					return;
 				}
 
@@ -715,7 +722,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					const value = (rest[0] ?? "").toLowerCase();
 					const on = value ? ["on", "1", "true", "yes", "开"].includes(value) : !b.quiet;
 					b.setQuiet(on);
-					ctx.ui?.notify?.(on ? "钉钉通知已静音。" : "钉钉通知已恢复。", "info");
+					ctx.ui?.notify?.(on ? "钉钉通知已静音。" : b.notificationsReleased ? "已取消静音；本会话仍已释放，自动推送未恢复。请执行 /dingtalk takeover 恢复。" : "钉钉通知已恢复。", "info");
 					return;
 				}
 
@@ -725,7 +732,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 							"/dingtalk status                  — 配置 + 运行状态（含当前机器人）",
 							"/dingtalk takeover                — 让钉钉接管本会话（默认机器人，开启入站控制）",
 							"/dingtalk takeover <机器人名>     — 绑定并接管指定机器人",
-							"/dingtalk release                 — 解除接管，关闭入站通道",
+							"/dingtalk release                 — 解除本会话接管，关闭入站并停止自动推送",
 							"/dingtalk test                    — 发一条测试通知",
 							"/dingtalk quiet on|off            — 静音 / 恢复通知",
 							`可用机器人: ${b.robotNames.join(" / ")}`,
@@ -735,12 +742,15 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 					return;
 				}
 
+				const curId = sessionIdOf(ctx);
+				const mismatch = Boolean(b.sessionId && curId && b.sessionId !== curId);
+				const state = mismatch ? "未接管（钉钉桥归属其他会话）" : b.notificationsReleased ? "已释放 · 入站连接已关闭 · 自动推送已停止" : b.takenOver ? "已接管" : "未接管";
 				const lines = [
-					...b.configSummary(),
+					`- **当前会话接管状态**: ${state}`,
 					...b.statusLines(),
+					...b.configSummary(),
 					`- **审批规则**: ${b.cfg.approval.mode === "remote" ? `${(b.cfg.approval.rules.length ? b.cfg.approval.rules : b.adapter.defaultApprovalRules).length} 条` : "未启用"}`,
 				];
-				const curId = sessionIdOf(ctx);
 				if (b.sessionId && curId && b.sessionId !== curId) {
 					lines.push(
 						`- **⚠️ 会话归属不符**: 桥绑定在 \`${b.sessionId}\`，当前会话是 \`${curId}\`。若当前会话要接管，执行 /dingtalk takeover。`,

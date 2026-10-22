@@ -1012,6 +1012,9 @@ console.log("\n[16] /dingtalk release 关闭入站通道 + scope 反向过滤");
 	// scope=group is the mirror image: 1:1 chatter is ignored, group @ works.
 	writeFileSync(configPath, JSON.stringify({ ...MAIN_CONFIG, control: { ...MAIN_CONTROL, scope: "group" } }));
 	await fire("session_start", { type: "session_start" });
+	check("显式 release 后，重载配置不会自动接管", MockSocket.instances.length === socketCount);
+	await commands.get("dingtalk").handler("takeover", ctx);
+	check("显式重新 takeover 后才恢复群聊连接", await waitFor(() => MockSocket.instances.length > socketCount));
 	const groupSocket = MockSocket.instances.at(-1)!;
 	groupSocket.open();
 	groupSocket.system("REGISTERED");

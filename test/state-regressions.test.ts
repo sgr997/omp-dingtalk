@@ -62,3 +62,7 @@ test("a named robot missing its secret refuses takeover without a lock", () => {
 test("a misspelled named scope falls back to direct and rejects group prompts", () => {
 	expect(run("omp-review-named-scope")).toContain('"namedScope":"direct","groupPromptDelivered":0');
 });
+
+test("explicit release silences future notifications with the default config on independent machines", () => {
+	expect(run("omp-explicit-release")).toContain("explicit release:");
+});
