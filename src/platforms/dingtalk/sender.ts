@@ -47,6 +47,8 @@ export interface SendResult {
 
 interface QueueItem {
 	opts: SendOptions;
+	/** Explicit command receipts keep their original robot after release resets config. */
+	target?: DingTalkConfig;
 	rank: number;
 	resolve?: (result: SendResult) => void;
 }
@@ -118,15 +120,15 @@ export class DingTalkSender {
 	 * Which transports this config — plus anything learned at runtime — can use.
 	 * A transport is only "on" when its mode is selected *and* it is usable.
 	 */
-	#channels(): { webhook: boolean; direct: boolean } {
-		const { mode } = this.#cfg.outbound;
-		const { clientId, clientSecret, robotCode } = this.#cfg.stream;
+	#channels(cfg = this.#cfg): { webhook: boolean; direct: boolean } {
+		const { mode } = cfg.outbound;
+		const { clientId, clientSecret, robotCode } = cfg.stream;
 		return {
-			webhook: (mode === "webhook" || mode === "both") && Boolean(this.#cfg.webhook.url),
+			webhook: (mode === "webhook" || mode === "both") && Boolean(cfg.webhook.url),
 			direct:
 				(mode === "direct" || mode === "both") &&
 				Boolean(clientId && clientSecret && robotCode) &&
-				this.#recipients().length > 0,
+				Boolean(cfg.control.allowUserId),
 		};
 	}
 
@@ -171,13 +173,19 @@ export class DingTalkSender {
 		return this.#push({ priority: "high", ...opts });
 	}
 
-	#push(opts: SendOptions): Promise<SendResult> {
+	captureTarget(): (opts: SendOptions) => Promise<SendResult> {
+		const target = this.#cfg;
+		return (opts) => this.#push({ priority: "high", ...opts }, target);
+	}
+
+	#push(opts: SendOptions, target?: DingTalkConfig): Promise<SendResult> {
 		const rank = RANK[opts.priority ?? "normal"];
 
 		if (opts.dedupeKey) {
 			const existing = this.#queue.find((item) => item.opts.dedupeKey === opts.dedupeKey);
 			if (existing) {
 				existing.opts = opts;
+				existing.target = target;
 				existing.rank = rank;
 				return Promise.resolve({ ok: true, dropped: true, errmsg: "已合并到队列中同 key 的消息" });
 			}
@@ -205,7 +213,7 @@ export class DingTalkSender {
 			resolve = r;
 		});
 
-		const item: QueueItem = { opts, rank, resolve };
+		const item: QueueItem = { opts, target, rank, resolve };
 		const insertAt = this.#queue.findIndex((queued) => queued.rank > rank);
 		if (insertAt === -1) this.#queue.push(item);
 		else this.#queue.splice(insertAt, 0, item);
@@ -242,7 +250,7 @@ export class DingTalkSender {
 
 				let result: SendResult;
 				try {
-					result = await this.#deliver(item.opts);
+					result = await this.#deliver(item.opts, item.target);
 				} catch (error) {
 					result = { ok: false, errmsg: error instanceof Error ? error.message : String(error) };
 				}
@@ -302,14 +310,14 @@ export class DingTalkSender {
 		return text.includes(keyword) ? text : `${keyword}\n${text}`;
 	}
 
-	async #deliver(opts: SendOptions): Promise<SendResult> {
-		const cfg = this.#cfg;
-		const valid = () => cfg === this.#cfg && (opts.isStillValid?.() ?? true);
-		const channels = this.#channels();
+	async #deliver(opts: SendOptions, target?: DingTalkConfig): Promise<SendResult> {
+		const cfg = target ?? this.#cfg;
+		const valid = () => (target !== undefined || cfg === this.#cfg) && (opts.isStillValid?.() ?? true);
+		const channels = this.#channels(cfg);
 		const results: SendResult[] = [];
 		if (!valid()) return { ok: false, dropped: true, errmsg: "发送状态已变化" };
 		if (channels.webhook) results.push(await this.#deliverWebhook(opts, cfg));
-		if (channels.direct && valid()) results.push(await this.#deliverDirect(opts, cfg, valid));
+		if (channels.direct && valid()) results.push(await this.#deliverDirect(opts, cfg, valid, target !== undefined));
 		if (results.length === 0) {
 			return { ok: false, errmsg: "没有可用的出站通道（检查 outbound.mode 与凭据）" };
 		}
@@ -384,7 +392,7 @@ export class DingTalkSender {
 	 * The keyword is deliberately *not* applied here: it is a custom-robot
 	 * webhook security setting and would just prefix every DM with junk.
 	 */
-	async #deliverDirect(opts: SendOptions, cfg: DingTalkConfig, valid: () => boolean): Promise<SendResult> {
+	async #deliverDirect(opts: SendOptions, cfg: DingTalkConfig, valid: () => boolean, pinned = false): Promise<SendResult> {
 		const { robotCode } = cfg.stream;
 		const recipients = cfg.control.allowUserId ? [cfg.control.allowUserId] : [];
 		if (!robotCode) return { ok: false, errmsg: "单聊推送需要 stream.robotCode" };
@@ -393,7 +401,7 @@ export class DingTalkSender {
 		}
 
 		try {
-			const token = await this.#getAccessToken(cfg);
+			const token = await this.#getAccessToken(cfg, pinned);
 			if (!valid()) return { ok: false, dropped: true, errmsg: "发送状态已变化" };
 			if (!token) return { ok: false, errmsg: "获取 access_token 失败" };
 
@@ -453,10 +461,11 @@ export class DingTalkSender {
 	}
 
 	/** Cached app access_token, refreshed a minute before it expires. */
-	async #getAccessToken(cfg = this.#cfg): Promise<string> {
+	async #getAccessToken(cfg = this.#cfg, pinned = false): Promise<string> {
 		const generation = this.#credentialGeneration;
-		if (cfg.stream.clientId !== this.#cfg.stream.clientId || cfg.stream.clientSecret !== this.#cfg.stream.clientSecret) return "";
-		if (this.#accessToken && Date.now() < this.#accessTokenExpiresAt) return this.#accessToken;
+		const current = cfg.stream.clientId === this.#cfg.stream.clientId && cfg.stream.clientSecret === this.#cfg.stream.clientSecret;
+		if (!current && !pinned) return "";
+		if (current && this.#accessToken && Date.now() < this.#accessTokenExpiresAt) return this.#accessToken;
 		const { clientId, clientSecret } = cfg.stream;
 		const response = await fetch("https://api.dingtalk.com/v1.0/oauth2/accessToken", {
 			method: "POST",
@@ -465,7 +474,9 @@ export class DingTalkSender {
 			signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
 		});
 		const payload = (await response.json()) as { accessToken?: string; expireIn?: number; message?: string };
-		if (generation !== this.#credentialGeneration) return "";
+		// A pinned receipt may use its old robot's token, but must never put that
+		// token into the currently selected robot's cache.
+		if (!current || generation !== this.#credentialGeneration) return pinned ? payload.accessToken ?? "" : "";
 		if (!payload.accessToken) {
 			this.#log.warn("获取 access_token 失败", payload);
 			return "";

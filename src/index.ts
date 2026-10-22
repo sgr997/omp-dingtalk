@@ -685,8 +685,16 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				}
 
 				if (action === "release" || action === "解除") {
-					const { wasTakenOver } = b.release({ stopNotifications: true });
+					const { wasTakenOver, confirmation } = b.release({ stopNotifications: true, confirm: true });
 					ctx.ui?.notify?.(`${wasTakenOver ? "已解除钉钉接管" : "本会话已处于释放状态"}，入站连接已关闭，自动推送已停止；重新 /dingtalk takeover 后恢复。`, "info");
+					if (confirmation) {
+						const owner = b.sessionId;
+						void confirmation.then((result) => {
+							if (!result.ok && !result.dropped && b.notificationsReleased && !b.takenOver && owner === b.sessionId) {
+								ctx.ui?.notify?.(`本会话已释放，但钉钉确认消息发送失败：${result.errmsg ?? "未知错误"}`, "error");
+							}
+						}).catch((error) => b.log.error("钉钉释放确认发送异常", error));
+					}
 					return;
 				}
 

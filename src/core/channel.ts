@@ -92,6 +92,8 @@ export interface ChannelSender {
 	updateConfig(config: unknown): void;
 	enqueue(message: Message & SendOptions): void;
 	send(message: Message & SendOptions): Promise<SendResult>;
+	/** Pin a command receipt to the current robot, retaining the shared queue/rate limit. */
+	captureTarget?(): (message: Message & SendOptions) => Promise<SendResult>;
 	discardInvalidated?(): void;
 	/** Best-effort reaction (✅/❌) to the most recent inbound message. */
 	sendEmotion?(target: Record<string, unknown> | undefined, emoji: string, isStillValid?: () => boolean): Promise<SendResult>;

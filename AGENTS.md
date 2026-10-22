@@ -165,7 +165,7 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 规则（agent 按这些引导，别让用户自己研究）：
 - 命名机器人只写自己不同的字段，其余继承全局设置；机器人名不能叫 `default`。
-- 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 解除接管、回到 `default` 并停止本会话自动推送；再次成功 takeover 后恢复。
+- 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 解除接管、回到 `default` 并停止本会话自动推送；再次成功 takeover 后恢复。 主动释放已接管的会话时，会向刚释放的机器人发送一条「钉钉已解除接管」确认；重复 release 不重复发送。确认走原发送队列，释放立即生效；发送失败会在终端提示，不会恢复接管或自动推送。
 - 锁按 `stream.clientId` 隔离：会话 A 接管 `home`、会话 B 接管 `work` 互不冲突，可以同时远程控制；两个会话抢同一个机器人，后来者赢。
 - 通知、审批、提问澄清都从**当前接管的机器人**发；未显式 release 的会话在未接管时按通知配置发 `default`。显式 release 后，即使 `onlyWhenTakenOver: false` 也保持停止；恢复同一会话或取消静音不会重新推送。查询时以 status 首行的当前会话状态、实际入站连接和自动推送状态为准，Stream 配置启用只代表允许连接。
 - `control.allowUserId` 可以每个机器人不同，把不同机器人交给不同人管。

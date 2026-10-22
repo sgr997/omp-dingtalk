@@ -66,3 +66,7 @@ test("a misspelled named scope falls back to direct and rejects group prompts", 
 test("explicit release silences future notifications with the default config on independent machines", () => {
 	expect(run("omp-explicit-release")).toContain("explicit release:");
 });
+
+test("release confirmation keeps its original robot without resuming automatic pushes", () => {
+	expect(run("omp-release-receipt")).toContain("release receipts:");
+});

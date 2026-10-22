@@ -91,6 +91,10 @@ class AdapterSender implements ChannelSender {
 		return this.#inner.send(message as Parameters<DingTalkSender["send"]>[0]) as Promise<SendResult>;
 	}
 
+	captureTarget(): (message: Message & SendOptions) => Promise<SendResult> {
+		return this.#inner.captureTarget();
+	}
+
 	discardInvalidated(): void {
 		this.#inner.discardInvalidated();
 	}

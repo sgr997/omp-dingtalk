@@ -214,7 +214,7 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 - `scope: "direct"` —— 群里 @ 机器人也**完全不响应**，只有单聊能指挥它。
 - `autoTakeover: false` —— 会话启动时**不会**自动连上入站通道，必须在 omp 里敲 `/dingtalk takeover` 才接通。已经接管的会话，新会话启动**不会**把它松开（接管是显式状态，只由 `/dingtalk takeover` 抢占或 `/dingtalk release` 主动解除）。
 - **接管会话是钉钉的唯一出口**：你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发——`onlyWhenTakenOver` 即使是 `false` 也一样。别的会话（旁观者）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，未显式 release 的会话按 `onlyWhenTakenOver` 正常发。此独占规则通过本地锁实现，不跨电脑。
-- **`/dingtalk release` 停止本会话的入站控制和自动推送**：即使 `onlyWhenTakenOver: false`，之后新产生的回复完成、错误、退出通知及模型通知工具也不会发送。重复 release 保持停止状态；`quiet off` 不会撤销它。该状态随本会话保存，恢复同一会话时不会被 `autoTakeover` 自动解除，直到再次成功执行 `/dingtalk takeover`。手动 `/dingtalk test` 仍可测试发送，但不会恢复自动推送。不同电脑上的其他会话不受影响。
+- **`/dingtalk release` 停止本会话的入站控制和自动推送**：即使 `onlyWhenTakenOver: false`，之后新产生的回复完成、错误、退出通知及模型通知工具也不会发送。重复 release 保持停止状态；`quiet off` 不会撤销它。该状态随本会话保存，恢复同一会话时不会被 `autoTakeover` 自动解除，直到再次成功执行 `/dingtalk takeover`。手动 `/dingtalk test` 仍可测试发送，但不会恢复自动推送。不同电脑上的其他会话不受影响。 主动释放已接管的会话时，会向刚释放的机器人发送一条「钉钉已解除接管」确认；重复 release 不重复发送。确认走原发送队列，释放立即生效；发送失败会在终端提示，不会恢复接管或自动推送。
 - `onlyWhenTakenOver: true` —— **接管前一条通知都不发**，接管后才开始发，`/dingtalk release` 之后又停。适合「坐在电脑前不想被打扰，出门前 takeover 一下」。
   - 它是**全有全无**的：空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
   - 要求**能**接管（`stream` 凭据齐全）。如果配了它却又无法接管，配置加载时会明确告警「一条通知也不会有」——这个组合是永久静默，最容易误判成「没问题」。

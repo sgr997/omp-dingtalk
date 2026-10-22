@@ -10,7 +10,7 @@
  * A new platform is a new `ChannelAdapter` implementation; nothing in this
  * file changes.
  */
-import type { ChannelAdapter, ChannelFormatter, ChannelRouter, ChannelSender, ChannelStream, InboundMessage, Message, NotifyOptions, PlatformConfig, StreamStatus } from "./channel";
+import type { ChannelAdapter, ChannelFormatter, ChannelRouter, ChannelSender, ChannelStream, InboundMessage, Message, NotifyOptions, PlatformConfig, SendResult, StreamStatus } from "./channel";
 import { buildAskTimeoutResult, buildRemoteAskResult, type AskRaceRequest, type AskToolResult } from "./ask-tool";
 import { ApprovalRegistry, type ApprovalDecision, type PendingApproval } from "./approval";
 import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./questions";
@@ -93,6 +93,7 @@ export class Bridge<P extends PlatformConfig> {
 	#lastAssistantText = "";
 	/** Invalidates callbacks, queued sends and requests when ownership changes. */
 	#generation = 0;
+	#receiptEpoch = 0;
 	#lockClientId = "";
 	#lockTimer: ReturnType<typeof setInterval> | undefined;
 	/** Last inbound message — used to react with ✅/❌ on session_stop. */
@@ -157,8 +158,9 @@ export class Bridge<P extends PlatformConfig> {
 			(options.bypassTakeover === true || !this.cfg.notify.onlyWhenTakenOver || this.takenOver);
 	}
 
-	#invalidate(reason: string): void {
+	#invalidate(reason: string, preserveReleaseReceipt = false): void {
 		this.#generation += 1;
+		if (!preserveReleaseReceipt) this.#receiptEpoch += 1;
 		this.approvals.clear(reason);
 		this.questions.clear(reason);
 		this.#lastInboundTarget = undefined;
@@ -716,15 +718,21 @@ export class Bridge<P extends PlatformConfig> {
 	}
 
 	/** Hand control back to the terminal and close the inbound channel. */
-	release(options: { stopNotifications?: boolean } = {}): { wasTakenOver: boolean } {
+	release(options: { stopNotifications?: boolean; confirm?: boolean } = {}): { wasTakenOver: boolean; confirmation?: Promise<SendResult> } {
 		const wasTakenOver = this.takenOver;
+		const alreadyReleased = this.notificationsReleased && !wasTakenOver;
+		const releasedRobot = this.activeRobotName;
+		const releasedSession = this.sessionId;
+		const releasedLock = this.lock;
+		const confirm = options.confirm && wasTakenOver && this.cfg.enabled && this.sender.configured && releasedLock?.isOwner()
+			? this.sender.captureTarget?.() : undefined;
 		if (options.stopNotifications) {
 			this.notificationsReleased = true;
 			this.#persistState();
 		}
 		// A delayed notification from this takeover must not outlive its release.
 		this.takenOver = false;
-		this.#invalidate("已解除接管");
+		this.#invalidate("已解除接管", options.stopNotifications === true && alreadyReleased);
 		// Releasing control also unbinds the robot: with nothing taken over,
 		// notifications go through the default robot again (see activeCfg).
 		if (this.activeRobotName !== "default") this.#setActiveRobot("default");
@@ -737,7 +745,14 @@ export class Bridge<P extends PlatformConfig> {
 		this.streamStatus = { state: "idle", reconnects: this.streamStatus.reconnects };
 		// Nobody can answer them any more; resolving as deny is the safe default.
 		if (wasTakenOver) this.log.info("已解除接管");
-		return { wasTakenOver };
+		const epoch = this.#receiptEpoch;
+		const confirmation = confirm?.({
+			...this.formatter.text("🔓 钉钉已解除接管", `本会话已释放，入站连接已关闭，自动推送已停止。\n\n目录：\`${truncatePath(this.cwd, 120)}\`\n机器人：\`${releasedRobot}\`\n\n重新执行 \`/dingtalk takeover\` 后恢复。`),
+			priority: "high",
+			isStillValid: () => epoch === this.#receiptEpoch && releasedSession === this.sessionId &&
+				this.notificationsReleased && !this.takenOver && !releasedLock?.heldByOther(),
+		});
+		return { wasTakenOver, confirmation };
 	}
 
 	dispose(reason: string): void {

@@ -1375,7 +1375,9 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 	await localCommands.get("dingtalk").handler("release", localCtx);
 	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
 	await tick(250);
-	check("release 之后又静默了", groupPosts().length === afterTaken, groupPosts().length - afterTaken);
+	const afterRelease = groupPosts().slice(afterTaken);
+	check("release 发送一条释放确认", afterRelease.filter((r) => String(r.body?.markdown?.title).includes("解除接管")).length === 1, afterRelease.length);
+	check("release 之后自动推送保持静默", afterRelease.every((r) => String(r.body?.markdown?.title).includes("解除接管")), afterRelease.length);
 
 	const idleCountBeforeQueuedRelease = groupPosts().filter((r) => String(r.body?.markdown?.title) === "omp 空闲中").length;
 	let releaseHeldSend!: () => void;
