@@ -14,12 +14,12 @@
   },
 
   "stream": {
-    "$comment": "入站控制通道。需要在钉钉开放平台创建「企业内部应用」，添加「机器人」能力并选择 Stream 模式后发布，然后把这个机器人加进群。",
-    "enabled": true,
+    "$comment": "企业应用凭据同时供 direct 出站和入站 Stream 使用；enabled 只控制是否启用入站连接。纯通知保持 false；远程控制才需要在钉钉为机器人启用 Stream 并发布应用。",
+    "enabled": false,
     "clientId": "",
     "clientSecret": "",
     "robotCode": "",
-    "$comment_robotCode": "机器人详情页的 robotCode（ding 开头）。出站选 direct / both 时必填，单聊推送要用。"
+    "$comment_robotCode": "机器人详情页的 robotCode（ding 开头）。出站选 direct / both 时必填；单聊推送使用它，即使 stream.enabled 为 false。"
   },
 
   "outbound": {
@@ -64,7 +64,7 @@
   },
 
   "question": {
-    "$comment": "把 omp 的「提问（ask）工具」转发到钉钉：会话里模型问你问题时，不再弹本地对话框，而是推送到钉钉等你在手机上回。仅在接管期间生效（本人在电脑前时照常弹本地框）。",
+    "$comment": "启用双端提问：接管期间且有可用出站通道时，终端和钉钉同时显示问题，任一端先答都算；未接管或出站不可用时只显示本地对话框。",
     "enabled": true,
     "timeoutMs": 600000,
     "$comment_timeoutMs": "多久没回复就告知 omp 自行决定（毫秒，默认 600000 = 10 分钟）。"
@@ -79,7 +79,7 @@
     "requireAt": true,
     "$comment_requireAt": "群聊里只有 @ 机器人时才响应，避免群里闲聊误触发。scope 为 direct 时无影响。",
     "allowUserId": "",
-    "$comment_allowUserId": "必填，只填一个人。在单聊里给机器人发 /id 就能拿到自己的 senderStaffId。这个人既能下指令，也是单聊推送的唯一收件人。留空 = 拒绝所有指令（除 /id 本身），这是故意的安全默认。",
+    "$comment_allowUserId": "填一个人的 senderStaffId；这是 direct 单聊推送的唯一收件人，启用入站控制时也限定唯一操作者。/id 只在 Stream 已启用、OMP 会话已 takeover 且消息符合 control.scope（群聊还需 @）时可用；它只绕过白名单检查。留空时其他指令都会被拒绝。修改后若旧会话仍持有 takeover，先 release，再开新会话加载配置并重新 takeover。",
     "freeText": true,
     "freeTextDelivery": "steer",
     "$comment_freeTextDelivery": "steer = 打断当前轮次立刻执行；followUp = 等当前轮次跑完再执行。",
@@ -87,7 +87,7 @@
   },
 
   "robots": {
-    "$comment": "多机器人模式（可选）。顶层字段就是默认机器人（default），上面的 webhook / stream / control 都属于它。想要多个机器人，就在这里按名字各配一份：它们继承全局设置（notify / approval / question / quiet），只覆盖自己的 webhook / stream / outbound / control。在 omp 里用 /dingtalk takeover <名字> 绑定哪个机器人接管本会话；不同 omp 会话可以分别接管不同的机器人，互不抢占。",
+    "$comment": "多机器人模式（可选）。顶层字段就是默认机器人（default），上面的 webhook / stream / control 都属于它。命名机器人继承全局设置（notify / approval / question / quiet），只覆盖自己的 webhook / stream / outbound / control。在 omp 里用 /dingtalk takeover <名字> 选择机器人；接管锁按 stream.clientId 隔离，只有不同 clientId 的机器人才能被不同会话同时接管。",
     "home": {
       "$comment": "例子：第二个机器人，名字叫 home。它有自己的群 Webhook 和 Stream 凭据，control.allowUserId 也可以和 default 不同（不同机器人可以让不同人控制）。",
       "webhook": {

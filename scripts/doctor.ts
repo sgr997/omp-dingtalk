@@ -5,12 +5,12 @@
  * 直接读你真实的配置文件，然后：
  *   1. 打印生效配置（脱敏）与配置来源
  *   2. 真发一条测试消息到钉钉，验证出站通道（加签 / 关键词 / token 全链路）
- *   3. 真去钉钉网关换取 Stream 接入点并等 REGISTERED，验证入站通道凭据
+ *   3. 真去钉钉网关换取 Stream 接入点，等待注册或连接状态以验证入站凭据
  *
  * 用法：
  *   bun run doctor              完整自检
- *   bun run doctor --no-send    只验入站，不往群里发测试消息
- *   bun run doctor --stream-only
+ *   bun run doctor --no-send    跳过实际发送；仍检查出站配置和入站 Stream
+ *   bun run doctor --stream-only 只检查入站 Stream
  */
 import { OUTBOUND_MODE_LABELS, describeConfig, loadConfig, type DingTalkConfig } from "../src/platforms/dingtalk/config";
 import { DingTalkSender, type SendResult } from "../src/platforms/dingtalk/sender";
@@ -69,7 +69,11 @@ function explainOutboundGap(cfg: DingTalkConfig): string[] {
 		if (!clientId || !clientSecret || !robotCode) {
 			lines.push("· 单聊推送要 stream.clientId / clientSecret / robotCode 三样齐全（robotCode 在机器人详情页，ding 开头）。");
 		} else if (!cfg.control.allowUserId) {
-			lines.push("· control.allowUserId 为空：把 /id 返回的 senderStaffId 填进这个字段才有推送对象。");
+			if (cfg.enabled && cfg.control.enabled && cfg.stream.enabled) {
+				lines.push("· control.allowUserId 为空：先在 omp 会话执行 /dingtalk takeover，再按 control.scope 发 /id，填入返回的 senderStaffId 才有推送对象。");
+			} else {
+				lines.push("· control.allowUserId 为空：direct 推送没有收件人。/id 需要启用插件控制和 Stream 并完成 takeover；也可从企业通讯录取得 senderStaffId 后填入。");
+			}
 		}
 	}
 	if (lines.length === 0) {
@@ -239,14 +243,32 @@ if (!config.stream.enabled) {
 // ------------------------------------------------------------- 结论
 console.log(`\n${"─".repeat(60)}`);
 if (failures === 0) {
-	console.log(`${GREEN}${BOLD}自检通过${RESET} —— 可以正常用了。`);
-	console.log(`\n下一步：`);
-	console.log(`  1. ${whereToTalk(config)}发 ${BOLD}/id${RESET}，拿到 senderStaffId`);
-	console.log(`  2. 填进 control.allowUserId（否则谁都能控制你的 omp）`);
-	if (config.outbound.mode === "direct" && !config.control.allowUserId) {
-		console.log(`  3. allowUserId 那个人就是单聊推送收件人`);
+	console.log(`${GREEN}${BOLD}自检通过${RESET} —— 已启用的钉钉通道连通。`);
+	if (config.enabled && config.control.enabled && config.stream.enabled) {
+		console.log(`\n下一步：`);
+		console.log(`  1. 启动 omp，在目标会话执行 ${BOLD}/dingtalk takeover${RESET}，接通入站控制`);
+		if (!config.control.allowUserId) {
+			console.log(`  2. 接管后从${whereToTalk(config)}发 ${BOLD}/id${RESET}，获取 senderStaffId`);
+			console.log(`  3. 把 ID 填进 control.allowUserId；留空时除 /id 外所有指令都会被拒绝`);
+			if (config.outbound.mode === "direct" || config.outbound.mode === "both") {
+				console.log(`     这个 ID 也是 direct 单聊推送的唯一收件人`);
+			}
+		} else {
+			console.log(`  2. 从${whereToTalk(config)}发 ${BOLD}/ping${RESET}，确认入站指令能到达当前会话`);
+		}
+	} else {
+		info("当前配置未启用完整的入站控制；本次自检不代表远程指令可用。");
+		if ((config.outbound.mode === "direct" || config.outbound.mode === "both") && !config.control.allowUserId) {
+			info("direct 单聊还缺 control.allowUserId 收件人。/id 需要插件、控制和 Stream 均启用并完成 takeover；请从钉钉管理后台取得 senderStaffId，或启用这些设置后再查询。");
+		}
+		if (!config.enabled) {
+			info("当前 enabled = false，插件在 OMP 会话中停用。");
+		} else if (!config.control.enabled) {
+			info("当前 control.enabled = false，入站指令被关闭；纯出站通知仍可用。");
+		} else if (!config.stream.enabled) {
+			info("要远程控制：填好 Stream 凭据、设 stream.enabled = true，再在 omp 会话执行 /dingtalk takeover。");
+		}
 	}
-	console.log(`  4. 正常启动 omp，用 /dingtalk status 看运行状态；入站要等 /dingtalk takeover 才会接通`);
 } else {
 	console.log(`${RED}${BOLD}有 ${failures} 项没通过${RESET} —— 按上面的提示改完再跑一次：bun run doctor`);
 }

@@ -1,6 +1,6 @@
 # omp-dingtalk — Agent 配置引导手册
 
-**这份 README 是写给执行 agent（大模型）看的**，不是给人看的操作手册。你（agent）被要求"把 omp 接入钉钉 / 配钉钉通知 / 远程控制 omp / 排查 omp-dingtalk 插件"时，按本手册引导用户完成配置。人读的版本见 `README.md`。
+**这份 AGENTS.md 是写给执行 agent（大模型）看的**，不是给人看的操作手册。你（agent）被要求"把 omp 接入钉钉 / 配钉钉通知 / 远程控制 omp / 排查 omp-dingtalk 插件"时，按本手册引导用户完成配置。人读的版本见 `README.md`。
 
 核心目标：让用户最少做决定、最快跑通，同时默认走安全配置。**不要把选项一股脑倒给用户让他自己挑**——那是人的文档做的事。
 
@@ -20,31 +20,32 @@
 
 1. **自定义机器人只能发群、不能收消息。** 想"控制 omp"（发文字下指令、审批）就必须配**企业内部应用** + Stream 模式。
 2. **出站 webhook 和出站 direct 互斥选择**，用 `outbound.mode` 切：`webhook`（默认，发群）/ `direct`（私聊）/ `both`。
-3. **入站 Stream 和出站 direct 共用同一套企业内部应用凭据**。配了 direct 出站，就顺带有了 Stream 的基础；但 Stream 还要单独在 omp 里 `/dingtalk takeover` 才接通（除非 `autoTakeover: true`）。
+3. **入站 Stream 和出站 direct 共用同一套企业内部应用凭据**，但 direct 单聊发送不需要启动入站 Stream。远程控制还要给应用添加机器人、启用并发布 Stream；连接后由用户执行 `/dingtalk takeover` 才能控制会话（除非明确配置 `autoTakeover: true`）。
 
 ---
 
-## 1. 引导决策：先问最少的，一次问完
+## 1. 先确认目标，再选一条配置路径
 
-**第一步先搞清楚用户想要哪种，不要让他自己研究通道。** 用一个问题定位：
+用户已经说清目标时直接按目标配置。否则只问这一句：
 
-> "你希望只收到 omp 的通知（跑完提醒我），还是也要能远程控制它（人不在电脑前，从钉钉发指令 / 审批）？"
+> "你希望钉钉只接收 omp 通知（发群还是私聊），还是也要从钉钉远程控制 omp？"
 
-然后按表选**推荐配置**，直接给出方案，别问第二个问题：
+按回答选路径，不让用户先研究通道名称：
 
-| 用户想要的 | 推荐方案 | 你要让用户准备的 | 配置要点 |
-| --- | --- | --- | --- |
-| 只收通知，发**群里** | webhook | 群自定义机器人 Webhook URL | `outbound.mode: webhook`（默认） |
-| 只收通知，发**私聊** | direct | 企业内部应用 ClientID/Secret + robotCode | `outbound.mode: direct`（收件人 = `control.allowUserId`） |
-| 也要**远程控制** | direct + Stream | 企业内部应用 ClientID/Secret + robotCode | `outbound.mode: direct` + `stream` 全填 + `autoTakeover` |
+| 目标 | 配置路径 | 必需信息 |
+| --- | --- | --- |
+| 只收群通知 | `webhook` | 群机器人的 Webhook URL；若启用了加签，还要 SEC 密钥 |
+| 只收单聊通知 | `direct` | 企业内部应用 ClientID、ClientSecret、robotCode、收件人的 `senderStaffId` |
+| 远程控制 omp | `direct` + 入站 Stream | 企业内部应用 ClientID、ClientSecret、robotCode；操作者的 `senderStaffId` 在接通后通过 `/id` 获取 |
 
-**私聊收件人的 userId** 不用一开始就抄——配置完能跑后，让用户在单聊给机器人发 `/whoami`，返回值就是 userId，再填进 `control.allowUserId`。这是最不容易抄错的路。
+用户明确要求群和私聊都收时才选 `outbound.mode: "both"`。远程控制默认用单聊；只有用户明确要在群里控制时才把 `control.scope` 改成 `group`，并保持 `requireAt: true`。
 
-**安全默认（agent 直接按这个引导，不要问）：**
-- `control.scope: "direct"` —— 只认单聊，群聊一律不理（防误触）。
-- `control.autoTakeover: false` —— 会话启动不自动接管，用户明确 `/dingtalk takeover` 才接通；已接管的会话不会因新会话启动而松开（接管是显式状态，只有被别的会话抢占或 `/dingtalk release` 才解除）。**接管会话是钉钉的唯一出口**：一旦有会话接管，通知、审批、提问澄清都只从那个会话发（`notify.onlyWhenTakenOver: false` 也一样），别的会话（旁观者）完全静默；接管被抢走的一方也立即闭嘴，只在终端日志里记一笔。避免两个窗口的通知混进同一个钉钉。
-- `control.allowUserId` 必填，只填一个人 —— 他既是白名单（**留空 = 拒绝一切指令，fail-closed**），也是单聊推送的唯一收件人。引导用户用 `/id` 拿到 ID 后填入。
-- 通知走私聊优先 `direct`（不打扰群），但要有企业内部应用。
+**按目标应用安全默认：**
+- 纯通知配置不需要开启入站控制。群通知不需要 `senderStaffId`；单聊通知需要它，因为 `control.allowUserId` 同时是单聊收件人。
+- 远程控制使用 `control.scope: "direct"`、`control.autoTakeover: false`。只有用户明确要求每个新会话自动接管时才设为 `true`。
+- `control.allowUserId` 留空时，除 `/id` 外所有入站指令都会被拒绝。远程控制的初始配置可暂时留空，取得 `/id` 返回的 `senderStaffId` 后必须回填；单聊通知不能在收件人 ID 为空时算配置完成。
+- `/id`（`/whoami`）只有在 Stream 已启用、会话已 `/dingtalk takeover`、且消息符合 `control.scope` 时才能收到。纯 webhook 或 Stream 关闭时不能用它取 ID。
+- 接管会话是钉钉的唯一出口：一旦有会话接管，通知、审批、提问澄清都只从那个会话发；旁观会话保持静默。接管状态跨会话保留，只有被其他会话抢占或执行 `/dingtalk release` 才解除。
 
 ---
 
@@ -59,11 +60,12 @@
    - 或自定义关键词（如 `omp`）→ 填 `webhook.keyword`。
 3. 用户回报：Webhook URL（`https://oapi.dingtalk.com/robot/send?access_token=xxx`）+ SEC 密钥（若有）。
 
-### 通道 B：企业内部应用（direct 出站 + Stream 入站）
+### 通道 B：企业内部应用（direct 出站；可选连接入站 Stream）
 1. 用户：钉钉开放平台 → 开发者后台 → **创建企业内部应用**，记下 **ClientID（AppKey）** 和 **ClientSecret（AppSecret）**。
-2. 用户：应用能力 → 添加应用能力 → **机器人**，接收消息模式选 **Stream 模式**，然后**发布应用**（不发布 Stream 连不上）。
-3. 用户回报：ClientID、ClientSecret、机器人详情页的 **robotCode**（`ding` 开头）。
-4. 单聊使用：不用把机器人加进任何群，直接私聊发消息。要用群聊才把机器人加群并改 `control.scope`。
+2. 用户：给应用添加 **机器人** 能力，按项目推荐将接收消息方式设为 **Stream** 并发布应用；在机器人详情页找到 **robotCode**（`ding` 开头）。direct 出站需要 ClientID、ClientSecret 和 robotCode。
+3. 插件配置里的 `stream.enabled` 决定是否实际连接入站：远程控制或用 `/id` 自助取 ID 时设为 `true`；纯 direct 通知设为 `false`，插件不会接收或处理钉钉指令。
+4. 用户回报：ClientID、ClientSecret、robotCode。单聊使用不需要把机器人加进任何群；要用群聊控制时才加群并按需修改 `control.scope`。
+5. 单聊通知还需要收件人的 `senderStaffId`。用户不知道时先问他是否能从钉钉后台取得；不要把 `/id` 说成无需启用 Stream 的操作。
 
 ---
 
@@ -92,13 +94,13 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 样例里 `webhook.url` 与 stream 凭据都是**空的**，开箱状态就是「未配置」——`chmod 600` 是因为文件里要放密钥；`doctor` 会列出还缺什么，不会出现一个看着像已配置的假地址。
 
-配置查找顺序（后者覆盖前者）：内置默认 → `~/.omp/agent/dingtalk.json` → `~/.omp/dingtalk.json` → `<项目>/.omp/dingtalk.json` → 环境变量。改完**开新会话生效**，不用重启。
+配置查找顺序（后者覆盖前者）：内置默认 → `~/.omp/agent/dingtalk.json` → `~/.omp/dingtalk.json` → `<项目>/.omp/dingtalk.json` → 环境变量。
 
 凭据不想落盘用环境变量（README.md 第 4 节有完整清单），常见几个：`DINGTALK_WEBHOOK_URL`、`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_ROBOT_CODE`、`DINGTALK_ALLOW_USER_ID`、`DINGTALK_AUTO_TAKEOVER`。
 
 **只给某个项目配**：放 `<项目>/.omp/dingtalk.json`，只覆盖要改的字段。
 
-**推荐组合（agent 直接给这个模板，删掉注释按用户回报填）：**
+**远程控制的初始模板**（用户信息还没取到时，`allowUserId` 先留空；不要填占位字符串）：
 
 ```json
 {
@@ -109,15 +111,22 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
     "clientSecret": "用户ClientSecret",
     "robotCode": "用户RobotCode"
   },
-  "control": { "scope": "direct", "autoTakeover": false, "allowUserId": "用户Id" },
+  "control": {
+    "enabled": true,
+    "scope": "direct",
+    "autoTakeover": false,
+    "allowUserId": ""
+  },
   "approval": { "mode": "off" },
   "notify": { "sessionStop": true, "errors": true }
 }
 ```
 
-- 只想发群不要私聊 → `outbound.mode` 改 `webhook`，填 `webhook.url`/`webhook.secret`，`stream` 可不配。
-- 想要会话一启动就自动接管（长任务里的提问能手机答）→ `autoTakeover: true`。
-- **双端提问**（`question.enabled`，默认开）：模型调用 `ask` 时，终端原生选择框和钉钉推送**同时**出现，任一端作答都算，另一端自动关闭/作废。为此插件**重注册了同名的 `ask` 工具**——所以 `pi.getAllTools()` 里 `ask` 的来源是扩展而非内置，这是预期行为，不是配置损坏。宿主不给同名 `ctx.invokeTool` 时（headless 会话、子代理）插件自动退回原生行为，不会报错。
+- 只收群通知：`outbound.mode: "webhook"`，填 `webhook.url` 和实际需要的 `webhook.secret` 或 `webhook.keyword`；设 `stream.enabled: false`、`control.enabled: false`，不需要 `allowUserId`。
+- 只收单聊通知：`outbound.mode: "direct"`，填 ClientID、ClientSecret、robotCode 和真实 `control.allowUserId`；设 `stream.enabled: false`、`control.enabled: false`。没有 `senderStaffId` 时先停在这一步询问用户，不要声称单聊已通。
+- 远程控制：按上面的初始模板配置。取得 `/id` 的真实 ID 后回填 `control.allowUserId`；在此之前只有身份查询可用，其他控制指令会被拒绝。
+- `autoTakeover: true` 仅在用户明确要求会话启动就自动接管时设置。默认由用户在会话内执行 `/dingtalk takeover`。
+- 先完成通知或远控的基本配置与验证，再处理可选的多机器人、远程审批、提问卡片等设置；不要把这些选项塞进首次配置提问。
 
 ### 4.1 遇到旧配置就直接迁移
 
@@ -163,24 +172,34 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 ---
 
-## 5. 验证（配置自检，不需要模型凭据）
+## 5. 按配置路径验证并收尾
 
-```bash
-cd <插件绝对路径>
-bun run doctor
-```
+`bun run doctor` 会实际发送一条测试通知，并连接一次入站 Stream。**在任何会话执行 `/dingtalk takeover` 之前运行它**；已有会话接管时再跑 doctor 会同时打开第二条 Stream，钉钉可能把消息分给自检连接。
 
-它会：读配置 → **真发一条测试消息**（群/单聊）→ **真连 Stream**。失败时自动翻译钉钉错误码（`310000` 加签/关键词错、`300001`/`300005` token 失效或机器人被移除、`410100` 限流）。
+按路径验证：
 
-**关键理解**：`doctor` 全绿只代表"能发出去、能连上"，不代表"能收到消息"。钉钉不保证推 `REGISTERED` 帧，连上没收到不代表坏。**最终验证入站**用：
+| 配置路径 | 检查方式 | 完成判据 |
+| --- | --- | --- |
+| 群 webhook 通知 | `bun run doctor` | 自检通过，用户在目标群看到测试消息。Stream 未启用的提示对纯通知路径是预期状态。 |
+| direct 单聊通知 | 填好真实 `control.allowUserId` 后运行 `bun run doctor` | 自检通过，收件人在单聊看到测试消息。ID 为空时 direct 没有收件人，不能算完成。 |
+| 远程控制 | 先运行 `bun run doctor --stream-only`；通过后启动 omp 并执行 `/dingtalk takeover` | Stream 检查通过；接管成功；白名单回填后，用户发来的允许指令确实控制当前会话。 |
 
-```bash
-bun run watch          # 连 Stream 打印每一帧，默认 20 秒
-```
+远程控制的 ID 回填顺序：
 
-让用户去给机器人发一条消息，终端打出帧才算真通。
+1. `doctor --stream-only` 在接管前验证 Stream，不发送通知。配置里的 `allowUserId` 暂时为空是安全的：除 `/id` 外，其他指令都会被拒绝。
+2. 启动 omp 会话，在目标会话执行 `/dingtalk takeover`；确认终端显示接管成功。
+3. 按 `control.scope` 从钉钉给机器人发 `/id` 或 `/whoami`。推荐的 `direct` 配置下从单聊发；群模式要在群里 @ 机器人。
+4. 将返回的 `senderStaffId` 写入对应机器人的 `control.allowUserId`。它也是 direct 单聊推送的唯一收件人。
+5. 回填后先在当前接管会话执行 `/dingtalk release`，再开或切换到新会话让配置重载，然后重新执行 `/dingtalk takeover`。原因是接管中的旧会话会把新会话当作旁观者并跳过配置刷新。用 `/dingtalk status` 核对配置来源和收件人，再用 `/dingtalk test` 确认出站消息到达，最后让用户发一条允许的控制指令确认端到端生效。
 
-**全绿后收尾**：让用户在**单聊**给机器人发 `/whoami`（`/id`、`我是谁` 也行），把返回的 `senderStaffId` 填进 `control.allowUserId`。这条指令**在白名单之前就能用**——首次接入还没进白名单也能拿到自己的 ID。
+`bun run doctor --no-send` 只跳过实际发送；如果 direct 因 `allowUserId` 为空而没有收件人，它仍不能代替 ID 回填。尚未配置收件人但只想查入站时用 `--stream-only`。
+
+如果用户只要单聊通知、不要远程控制，先让用户从钉钉后台提供收件人的 `senderStaffId`；不要默认打开 Stream 来取 ID。`/id` 是远控引导步骤，只有 Stream 已启用、会话已 takeover 且消息符合 scope 才能使用。配置文件改动在可处理的新会话 `session_start` 时加载；当前会话若持有 takeover，先 `/dingtalk release`，再开新会话并重新 takeover，然后用 `/dingtalk status` 查看实际生效来源。
+
+**配置任务完成条件：**
+- 群通知：用户确认目标群收到自检消息。
+- 单聊通知：用户确认指定收件人收到消息，且 `control.allowUserId` 是真实 ID。
+- 远程控制：Stream 连接检查通过、接管成功、白名单已回填，且一条允许的指令到达当前会话。仅 doctor 通过不代表远程控制已验收。
 
 ---
 
@@ -199,7 +218,7 @@ bun run watch          # 连 Stream 打印每一帧，默认 20 秒
 | 终端提示「接管已被另一个会话抢占」 | 另一个会话在同一钉钉应用上 takeover 了。本会话已自动释放、Stream 已关闭，**不再往钉钉推任何卡**（钉钉只有一个出口）。想抢回就在本会话再 takeover；不想被抢就给每个会话配不同的 `stream.clientId`（或多机器人模式各自接管不同机器人，见 §4.2） |
 | 想多窗口同时远程控制 | 多机器人模式：每个机器人一把独立的锁（按 `stream.clientId` 隔离），会话 A 接管 A 机器人、会话 B 接管 B 机器人即可并存；抢同一个机器人仍是后来者赢（见 §4.2） |
 | 命令回复延迟几秒 | 正常，出站限流最短间隔 2.2 秒 |
-| 改了配置没生效 | 配置会话启动时重载，开新会话。`/dingtalk status` 会列实际生效的来源 |
+| 改了配置没生效 | 配置在可处理的 `session_start` 时重载。若旧会话仍持有 takeover，先执行 `/dingtalk release`，再开新会话并重新 takeover。`/dingtalk status` 会列实际生效的来源 |
 
 ---
 
