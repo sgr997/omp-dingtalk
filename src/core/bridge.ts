@@ -89,6 +89,8 @@ export class Bridge<P extends PlatformConfig> {
 
 	#pi: ApiLike;
 	#lastAssistantText = "";
+	/** Invalidates queued notifications when this bridge releases or disposes. */
+	#notificationGeneration = 0;
 	#lockClientId = "";
 	#lockTimer: ReturnType<typeof setInterval> | undefined;
 	/** Last inbound message — used to react with ✅/❌ on session_stop. */
@@ -224,6 +226,7 @@ export class Bridge<P extends PlatformConfig> {
 		// The platform rejects an over-long message instead of delivering its head,
 		// so a long reply is sent as several messages rather than cut short.
 		// `maxTextChars` is the per-message budget, not the total.
+		const generation = this.#notificationGeneration;
 		const chunks = splitMessage(message.text, this.cfg.notify.maxTextChars);
 		for (let i = 0; i < chunks.length; i++) {
 			const part = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
@@ -234,6 +237,7 @@ export class Bridge<P extends PlatformConfig> {
 				// Each chunk needs its own dedupe key, or the second one would
 				// be merged into the first and the rest of the reply lost.
 				dedupeKey: options.dedupeKey ? `${options.dedupeKey}#${i}` : undefined,
+				isStillValid: () => generation === this.#notificationGeneration,
 			});
 		}
 	}
@@ -621,6 +625,8 @@ export class Bridge<P extends PlatformConfig> {
 	/** Hand control back to the terminal and close the inbound channel. */
 	release(): { wasTakenOver: boolean } {
 		const wasTakenOver = this.takenOver;
+		// A delayed notification from this takeover must not outlive its release.
+		if (wasTakenOver) this.#notificationGeneration += 1;
 		this.takenOver = false;
 		// Releasing control also unbinds the robot: with nothing taken over,
 		// notifications go through the default robot again (see activeCfg).
@@ -640,6 +646,7 @@ export class Bridge<P extends PlatformConfig> {
 	}
 
 	dispose(reason: string): void {
+		this.#notificationGeneration += 1;
 		this.takenOver = false;
 		this.#stopLockHeartbeat();
 		this.lock?.release();

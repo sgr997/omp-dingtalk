@@ -55,6 +55,8 @@ export interface SendOptions {
 	text: string;
 	priority?: "high" | "normal" | "low";
 	dedupeKey?: string;
+	/** Re-check queue-time validity immediately before delivery. */
+	isStillValid?: () => boolean;
 }
 
 export interface SendResult {

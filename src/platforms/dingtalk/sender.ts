@@ -30,6 +30,8 @@ export interface SendOptions {
 	priority?: "high" | "normal" | "low";
 	/** Replaces an identical queued message instead of stacking a duplicate. */
 	dedupeKey?: string;
+	/** Re-check queue-time validity immediately before delivery. */
+	isStillValid?: () => boolean;
 	atMobiles?: string[];
 	atUserIds?: string[];
 	atAll?: boolean;
@@ -215,6 +217,12 @@ export class DingTalkSender {
 				if (wait > 0) await sleep(wait);
 				const item = this.#queue.shift();
 				if (!item) break;
+				if (item.opts.isStillValid && !item.opts.isStillValid()) {
+					this.#dropped += 1;
+					this.#log.debug("排队通知已失效，跳过发送", { title: item.opts.title });
+					item.resolve?.({ ok: false, dropped: true, errmsg: "通知状态已变化，已取消发送" });
+					continue;
+				}
 
 				let result: SendResult;
 				try {

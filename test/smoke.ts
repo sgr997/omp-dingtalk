@@ -87,6 +87,7 @@ interface Recorded {
 	body: any;
 }
 const requests: Recorded[] = [];
+let heldWebhookSend: { started: () => void; waitUntilReleased: Promise<void> } | undefined;
 
 function response(data: unknown) {
 	return {
@@ -110,6 +111,13 @@ globalThis.fetch = (async (input: any, init?: any) => {
 	// assertion about "the latest notification" fails.
 	if (process.env.SMOKE_TRACE && url.includes("dingtalk.com")) {
 		console.log(`    [net ${String(requests.length).padStart(3)}] ${String(body?.markdown?.title ?? url.slice(0, 70))}`);
+	}
+
+	if (url.includes("oapi.dingtalk.com/robot/send?") && heldWebhookSend) {
+		const held = heldWebhookSend;
+		heldWebhookSend = undefined;
+		held.started();
+		await held.waitUntilReleased;
 	}
 
 	if (url.includes("/gateway/connections/open")) {
@@ -1365,6 +1373,24 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
 	await tick(250);
 	check("release 之后又静默了", groupPosts().length === afterTaken, groupPosts().length - afterTaken);
+
+	const idleCountBeforeQueuedRelease = groupPosts().filter((r) => String(r.body?.markdown?.title) === "omp 空闲中").length;
+	let releaseHeldSend!: () => void;
+	let notifyHeldSendStarted!: () => void;
+	const heldSendStarted = new Promise<void>((resolve) => (notifyHeldSendStarted = resolve));
+	const waitToReleaseHeldSend = new Promise<void>((resolve) => (releaseHeldSend = resolve));
+	heldWebhookSend = { started: notifyHeldSendStarted, waitUntilReleased: waitToReleaseHeldSend };
+	await localCommands.get("dingtalk").handler("takeover", localCtx);
+	await heldSendStarted; // Keep the takeover card in-flight so the idle card stays queued behind it.
+	await localHandlers.get("session_stop")![0](stopEvent, localCtx);
+	await localCommands.get("dingtalk").handler("release", localCtx);
+	releaseHeldSend();
+	await tick(150);
+	check(
+		"release 会丢弃队列里尚未发出的空闲通知",
+		groupPosts().filter((r) => String(r.body?.markdown?.title) === "omp 空闲中").length === idleCountBeforeQueuedRelease,
+		groupPosts().slice(-3).map((r) => r.body?.markdown?.title),
+	);
 
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
