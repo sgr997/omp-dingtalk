@@ -66,6 +66,79 @@ test("a late token response from A cannot poison B's cache", async () => {
 	}
 });
 
+test("completion waits for a slow viewing reaction before recalling it", async () => {
+	const f = fixture();
+	const originalFetch = globalThis.fetch;
+	let finishViewing!: () => void;
+	let markStarted!: () => void;
+	const started = new Promise<void>((resolve) => { markStarted = resolve; });
+	const calls: string[] = [];
+	const visible = new Set<string>();
+	globalThis.fetch = (async (url, init) => {
+		const body = JSON.parse(String(init?.body));
+		if (String(url).includes("/oauth2/")) return new Response(JSON.stringify({ accessToken: "token" }));
+		const recall = String(url).endsWith("/recall");
+		calls.push(`${recall ? "recall" : "reply"}:${body.emotionName}`);
+		if (!recall && body.emotionName === "👀") {
+			await new Promise<void>((resolve) => { finishViewing = resolve; markStarted(); });
+		}
+		if (recall) visible.delete(body.emotionName);
+		else visible.add(body.emotionName);
+		return new Response("{}");
+	}) as typeof fetch;
+	try {
+		const sender = new DingTalkSender(loadConfig(f.scratch).config, log);
+		const target = { msgId: "m", conversationId: "c" };
+		const viewing = sender.sendEmotion(target, "👀");
+		await started;
+		const completed = sender.sendEmotion(target, "✅");
+		expect(calls).toEqual(["reply:👀"]);
+		finishViewing();
+		expect((await viewing).ok).toBe(true);
+		expect((await completed).ok).toBe(true);
+		expect(calls).toEqual(["reply:👀", "recall:👀", "reply:✅ 已完成"]);
+		expect([...visible]).toEqual(["✅ 已完成"]);
+	} finally {
+		globalThis.fetch = originalFetch;
+		f.cleanup();
+	}
+});
+
+test("a failed recall retains the viewing state for retry and invalidation stops the terminal reply", async () => {
+	const f = fixture();
+	const originalFetch = globalThis.fetch;
+	let failRecall = true;
+	let active = true;
+	let invalidateOnRecall = false;
+	const calls: string[] = [];
+	globalThis.fetch = (async (url, init) => {
+		const body = JSON.parse(String(init?.body));
+		if (String(url).includes("/oauth2/")) return new Response(JSON.stringify({ accessToken: "token" }));
+		const recall = String(url).endsWith("/recall");
+		calls.push(`${recall ? "recall" : "reply"}:${body.emotionName}`);
+		if (recall && failRecall) return new Response("unavailable", { status: 503 });
+		if (recall && invalidateOnRecall) active = false;
+		return new Response("{}");
+	}) as typeof fetch;
+	try {
+		const sender = new DingTalkSender(loadConfig(f.scratch).config, log);
+		const target = { msgId: "m", conversationId: "c" };
+		expect((await sender.sendEmotion(target, "👀")).ok).toBe(true);
+		expect((await sender.sendEmotion(target, "✅")).ok).toBe(false);
+		expect(calls).toEqual(["reply:👀", "recall:👀"]);
+		failRecall = false;
+		expect((await sender.sendEmotion(target, "✅")).ok).toBe(true);
+		expect(calls.slice(-2)).toEqual(["recall:👀", "reply:✅ 已完成"]);
+		await sender.sendEmotion(target, "👀");
+		invalidateOnRecall = true;
+		expect((await sender.sendEmotion(target, "✅", () => active)).dropped).toBe(true);
+		expect(calls.at(-1)).toBe("recall:👀");
+	} finally {
+		globalThis.fetch = originalFetch;
+		f.cleanup();
+	}
+});
+
 test("host cancellation invalidates the question card still waiting in the queue", async () => {
 	const f = fixture();
 	const queued: SendOptions[] = [];

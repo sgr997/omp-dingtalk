@@ -53,6 +53,12 @@ interface QueueItem {
 	resolve?: (result: SendResult) => void;
 }
 
+interface EmotionTag {
+	name: string;
+	emotionId: string;
+	backgroundId: string;
+}
+
 const WINDOW_MS = 60_000;
 /** DingTalk allows 20/min; stay under it so a burst never trips the 10-minute block. */
 const MAX_PER_WINDOW = Number(process.env.OMP_DINGTALK_MAX_PER_MIN) || 15;
@@ -63,7 +69,16 @@ const HTTP_TIMEOUT_MS = 10_000;
 const THROTTLE_COOLDOWN_MS = 10 * 60_000;
 /** Enterprise-app robot 1:1 push. */
 const OTO_MESSAGE_URL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend";
+const EMOTION_API = "https://api.dingtalk.com/v1.0/robot/emotion";
+const MAX_REACTION_STATES = 500;
 const RANK: Record<NonNullable<SendOptions["priority"]>, number> = { high: 0, normal: 1, low: 2 };
+
+function emotionTag(emoji: string): EmotionTag {
+	if (emoji === "👀") return { name: "👀", emotionId: "2659900", backgroundId: "im_bg_1" };
+	if (emoji === "✅") return { name: "✅ 已完成", emotionId: "54054", backgroundId: "im_bg_5" };
+	if (emoji === "❌") return { name: "❌ 失败", emotionId: "34019", backgroundId: "im_bg_6" };
+	return { name: emoji, emotionId: "34019", backgroundId: "im_bg_6" };
+}
 
 export class DingTalkSender {
 	#cfg: DingTalkConfig;
@@ -81,6 +96,10 @@ export class DingTalkSender {
 	#accessToken = "";
 	#accessTokenExpiresAt = 0;
 	#credentialGeneration = 0;
+	/** Last successful reaction per inbound message, so a status change can replace it. */
+	#reactionStates = new Map<string, EmotionTag>();
+	/** Serialize transitions per message; reply/recall races otherwise leave two reactions behind. */
+	#reactionTails = new Map<string, Promise<void>>();
 
 	constructor(cfg: DingTalkConfig, logger: Logger) {
 		this.#cfg = cfg;
@@ -488,7 +507,7 @@ export class DingTalkSender {
 	}
 
 	/**
-	 * Add an emoji reaction to an inbound message.
+	 * Set the robot reaction on an inbound message.
 	 *
 	 * Uses the enterprise-app robot OpenAPI (`/v1.0/robot/emotion/reply`), which
 	 * needs `access_token` + `robotCode` + the message's `msgId` and
@@ -496,7 +515,9 @@ export class DingTalkSender {
 	 * delivers. Unlike `sessionWebhook` this does not expire, so it works even
 	 * on long-running sessions.
 	 *
-	 * Returns true on success so the caller can skip a fallback message.
+	 * DingTalk's reply endpoint adds a reaction; it does not replace an existing
+	 * one. Remember the previous successful tag and recall it before attaching a
+	 * new status, so 👀 closes into one ✅/❌ terminal state.
 	 */
 	async sendEmotion(message: {
 		msgId?: string;
@@ -511,11 +532,68 @@ export class DingTalkSender {
 		if (!msgId || !conversationId || !robotCode) {
 			return { ok: false, errmsg: "缺少 msgId / conversationId / robotCode，无法发送表情" };
 		}
+		const key = `${robotCode}\u0000${conversationId}\u0000${msgId}`;
+		const tag = emotionTag(emoji);
+		const previousTail = this.#reactionTails.get(key);
+		const replace = () => this.#replaceEmotion({ cfg, key, msgId, conversationId, robotCode, tag, isStillValid });
+		const operation = previousTail ? previousTail.then(replace) : replace();
+		const tail = operation.then(() => undefined, () => undefined);
+		this.#reactionTails.set(key, tail);
+		try {
+			return await operation;
+		} finally {
+			if (this.#reactionTails.get(key) === tail) this.#reactionTails.delete(key);
+		}
+	}
+
+	async #replaceEmotion(options: {
+		cfg: DingTalkConfig;
+		key: string;
+		msgId: string;
+		conversationId: string;
+		robotCode: string;
+		tag: EmotionTag;
+		isStillValid: () => boolean;
+	}): Promise<SendResult> {
+		const { cfg, key, msgId, conversationId, robotCode, tag, isStillValid } = options;
+		if (cfg !== this.#cfg || !isStillValid()) return { ok: false, dropped: true, errmsg: "接管状态已变化" };
 		try {
 			const token = await this.#getAccessToken(cfg);
 			if (cfg !== this.#cfg || !isStillValid()) return { ok: false, dropped: true, errmsg: "接管状态已变化" };
 			if (!token) return { ok: false, errmsg: "获取 access_token 失败" };
-			const response = await fetch("https://api.dingtalk.com/v1.0/robot/emotion/reply", {
+			const previous = this.#reactionStates.get(key);
+			if (previous?.name === tag.name) return { ok: true };
+			if (previous) {
+				const recalled = await this.#callEmotion("recall", { msgId, conversationId, robotCode, tag: previous, token });
+				if (!recalled.ok) return recalled;
+				this.#reactionStates.delete(key);
+			}
+			if (cfg !== this.#cfg || !isStillValid()) return { ok: false, dropped: true, errmsg: "接管状态已变化" };
+			const replied = await this.#callEmotion("reply", { msgId, conversationId, robotCode, tag, token });
+			if (replied.ok) {
+				this.#reactionStates.delete(key);
+				this.#reactionStates.set(key, tag);
+				if (this.#reactionStates.size > MAX_REACTION_STATES) {
+					const oldest = this.#reactionStates.keys().next().value;
+					if (oldest) this.#reactionStates.delete(oldest);
+				}
+			}
+			return replied;
+		} catch (error) {
+			return { ok: false, errmsg: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	async #callEmotion(endpoint: "reply" | "recall", options: {
+		msgId: string;
+		conversationId: string;
+		robotCode: string;
+		tag: EmotionTag;
+		token: string;
+	}): Promise<SendResult> {
+		const { msgId, conversationId, robotCode, tag, token } = options;
+		try {
+			const response = await fetch(`${EMOTION_API}/${endpoint}`, {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -526,19 +604,19 @@ export class DingTalkSender {
 					openMsgId: msgId,
 					openConversationId: conversationId,
 					emotionType: 2,
-					emotionName: emoji,
+					emotionName: tag.name,
 					textEmotion: {
-						emotionId: "2659900",
-						emotionName: emoji,
-						text: emoji,
-						backgroundId: "im_bg_1",
+						emotionId: tag.emotionId,
+						emotionName: tag.name,
+						text: tag.name,
+						backgroundId: tag.backgroundId,
 					},
 				}),
 				signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
 			});
 			if (!response.ok) {
 				const raw = await response.text();
-				this.#log.warn("表情回复失败", { status: response.status, body: raw.slice(0, 300) });
+				this.#log.warn(`表情${endpoint === "recall" ? "撤回" : "回复"}失败`, { status: response.status, body: raw.slice(0, 300) });
 				return { ok: false, errmsg: `HTTP ${response.status}: ${raw.slice(0, 200)}` };
 			}
 			return { ok: true };

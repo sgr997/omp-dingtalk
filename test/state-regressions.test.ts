@@ -70,3 +70,7 @@ test("explicit release silences future notifications with the default config on 
 test("release confirmation keeps its original robot without resuming automatic pushes", () => {
 	expect(run("omp-release-receipt")).toContain("release receipts:");
 });
+
+test("a completed inbound run replaces its viewing reaction with one done reaction", () => {
+	expect(run("omp-reaction-lifecycle")).toContain("reaction lifecycle:");
+});

@@ -905,10 +905,10 @@ console.log("\n[12] 会话事件 → 通知");
 	// ended on an unrecovered error reacts ❌ instead. The stream already
 	// delivered live.robot() messages, so there is an inbound message to react to.
 	const reactions = (emoji: string) =>
-		requests.filter((r) => r.url.includes("/robot/emotion/reply") && r.body?.emotionName === emoji);
+		requests.filter((r) => r.url.includes("/robot/emotion/reply") && String(r.body?.emotionName ?? "").startsWith(emoji));
 	const okBefore = reactions("✅").length;
 	await fire("session_stop", { type: "session_stop", messages: [], turn_id: 2, last_assistant_message: { role: "assistant", content: [{ type: "text", text: "一切正常" }] }, session_id: "s1", stop_hook_active: false });
-	check("干净结束给用户消息打 ✅", await waitFor(() => reactions("✅").length > okBefore), reactions("✅").length);
+	check("干净结束给用户消息打 ✅，重复完成不重复贴", okBefore > 0 && reactions("✅").length === okBefore, reactions("✅").length);
 
 	const failBefore = reactions("❌").length;
 	await fire("auto_retry_end", { type: "auto_retry_end", success: false, finalError: "boom" });
