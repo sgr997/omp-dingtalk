@@ -9,8 +9,9 @@
  *
  * Run with:  bun test/verify-load.ts
  */
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homeDir } from "../src/core/util";
 
@@ -29,53 +30,110 @@ function check(name: string, condition: boolean, extra?: unknown): void {
 	}
 }
 
-/** Locate the installed OMP package so its loader can be imported directly. */
-function findPackageDir(): string | undefined {
-	// `OMP_PACKAGE_DIR` points straight at a package directory.
-	const explicit = process.env.OMP_PACKAGE_DIR;
-	if (explicit && existsSync(join(explicit, "package.json"))) return explicit;
+const PACKAGE_NAMES = ["pi-coding-agent", "pi-coding-agent-zh"];
 
-	// `pi-coding-agent-zh` is the same loader shipped under the zh package name.
-	const names = ["pi-coding-agent", "pi-coding-agent-zh"];
-	const roots = [
-		join(homeDir(), ".bun", "install", "global", "node_modules"),
-		join(homeDir(), "node_modules"),
-		join(process.cwd(), "node_modules"),
-	];
-	for (const root of roots) {
-		for (const name of names) {
-			const dir = join(root, "@oh-my-pi", name);
-			if (existsSync(join(dir, "package.json"))) return dir;
+/**
+ * A package directory is only usable here when the TypeScript sources are
+ * present: this script imports the loader's `src/`, not its built output.
+ */
+function isUsablePackage(dir: string | undefined): dir is string {
+	if (!dir) return false;
+	return existsSync(join(dir, "package.json")) && existsSync(join(dir, "src", "extensibility", "extensions", "index.ts"));
+}
+
+/** Follow the installed `omp` binary to the package it runs from. */
+function packageFromBinary(): string | undefined {
+	const finder = process.platform === "win32" ? "where" : "which";
+	let binary = "";
+	try {
+		binary = execFileSync(finder, ["omp"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+			.split(/\r?\n/)[0]
+			?.trim() ?? "";
+	} catch {
+		return undefined;
+	}
+	if (!binary) return undefined;
+	let real = binary;
+	try {
+		real = realpathSync(binary);
+	} catch {
+		// A shim that cannot be resolved is still worth walking from its own path.
+	}
+	let dir = dirname(real);
+	while (dir !== dirname(dir)) {
+		if (basename(dir) === "node_modules") {
+			for (const name of PACKAGE_NAMES) {
+				const candidate = join(dir, "@oh-my-pi", name);
+				if (isUsablePackage(candidate)) return candidate;
+			}
 		}
+		dir = dirname(dir);
 	}
 	return undefined;
 }
 
-const packageDir = findPackageDir();
-if (!packageDir) {
-	console.error("找不到 @oh-my-pi/pi-coding-agent。设置 OMP_PACKAGE_DIR 指向它的安装目录后重试。");
-	process.exit(2);
-}
-console.log(`使用 OMP 包: ${packageDir}\n`);
+/** Every plausible package directory, best guess first. */
+function candidateDirs(): string[] {
+	const dirs: string[] = [];
+	// An explicit override wins, but a broken one must not stop the search.
+	const explicit = process.env.OMP_PACKAGE_DIR;
+	if (explicit) dirs.push(explicit);
+	const fromBinary = packageFromBinary();
+	if (fromBinary) dirs.push(fromBinary);
 
-const loader = (await import(pathToFileURL(join(packageDir, "src", "extensibility", "extensions", "index.ts")).href)) as {
+	const roots = [
+		join(homeDir(), ".bun", "install", "global", "node_modules"),
+		join(homeDir(), "node_modules"),
+		join(homeDir(), ".npm-global", "lib", "node_modules"),
+		join(homeDir(), "AppData", "Roaming", "npm", "node_modules"),
+		join(process.cwd(), "node_modules"),
+	];
+	for (const root of roots) {
+		for (const name of PACKAGE_NAMES) dirs.push(join(root, "@oh-my-pi", name));
+	}
+	return [...new Set(dirs)].filter(isUsablePackage);
+}
+
+type LoadedExtension = {
+	path: string;
+	label?: string;
+	handlers: Map<string, unknown[]>;
+	tools: Map<string, unknown>;
+	commands: Map<string, unknown>;
+};
+
+type LoaderModule = {
 	discoverAndLoadExtensions: (
 		configuredPaths: string[],
 		cwd: string,
 		eventBus?: unknown,
 		disabledExtensionIds?: string[],
 		options?: unknown,
-	) => Promise<{
-		extensions: Array<{
-			path: string;
-			label?: string;
-			handlers: Map<string, unknown[]>;
-			tools: Map<string, unknown>;
-			commands: Map<string, unknown>;
-		}>;
-		errors: Array<{ path: string; error: string }>;
-	}>;
+	) => Promise<{ extensions: LoadedExtension[]; errors: Array<{ path: string; error: string }> }>;
 };
+
+// Some installs ship `src/` without its own imports (a partial publish, or a
+// package whose sibling `src/discovery` is missing). Try each candidate until
+// one actually loads, so a broken global install does not hide a working one.
+let packageDir = "";
+let loader: LoaderModule | undefined;
+const loadErrors: string[] = [];
+for (const dir of candidateDirs()) {
+	try {
+		loader = await import(pathToFileURL(join(dir, "src", "extensibility", "extensions", "index.ts")).href);
+		packageDir = dir;
+		break;
+	} catch (error) {
+		loadErrors.push(`${dir}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+if (!loader) {
+	console.error("找不到可用的 @oh-my-pi/pi-coding-agent（需要包含 src/ 源码且能加载的安装）。");
+	for (const error of loadErrors) console.error(`  - ${error}`);
+	console.error("设置 OMP_PACKAGE_DIR 指向它的安装目录后重试。");
+	process.exit(2);
+}
+console.log(`使用 OMP 包: ${packageDir}\n`);
 
 const cwd = process.cwd();
 console.log(`[1] discoverAndLoadExtensions(cwd=${cwd})`);

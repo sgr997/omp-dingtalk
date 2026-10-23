@@ -6,6 +6,7 @@
  * `omp plugin link` works without a `bun install` step.
  */
 import { createHmac } from "node:crypto";
+import { homedir } from "node:os";
 
 /**
  * Decode a base64 payload into UTF-8 text.
@@ -179,9 +180,14 @@ export function fenceSafe(text: string): string {
 	return text.replace(/```/g, "``\u200b`");
 }
 
+/** Home directory, falling back to the OS when neither env var is set. */
+function currentHome(): string {
+	return process.env.HOME || process.env.USERPROFILE || homedir();
+}
+
 /** `~` expansion for config paths (Windows-aware). */
 export function expandHome(input: string): string {
-	const home = process.env.HOME || process.env.USERPROFILE || "";
+	const home = currentHome();
 	if (!home) return input;
 	if (input === "~") return home;
 	if (input.startsWith("~/") || input.startsWith("~\\")) {
@@ -190,7 +196,7 @@ export function expandHome(input: string): string {
 	return input;
 }
 
-/** Home directory of the current user, or "" when unknown. */
+/** Home directory of the current user. */
 export function homeDir(): string {
-	return process.env.HOME || process.env.USERPROFILE || "";
+	return currentHome();
 }

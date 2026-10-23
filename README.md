@@ -526,7 +526,7 @@ bun run doctor
 再跑单元/加载测试：
 
 ```bash
-bun run test        # 全量：状态回归 + smoke + 加载（加载需要本机已装 omp）
+bun run test        # 全量：状态回归 + smoke + 加载（加载测试需要能定位到 omp 安装目录）
 bun run test:state  # 状态回归与双进程锁交错，不连接真实钉钉
 bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
@@ -543,7 +543,7 @@ bun run lint        # oxlint（0 警告）
 | 现象 | 排查 |
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
-| release 后仍每轮收到完成通知 | 通知只在接管期间发。更新并重启 OMP 会话后，再执行 release；status 首行应显示“已释放”，实际入站连接“已关闭”，自动推送“已停止”。本机 release 不改变其他电脑的会话 |
+| release 后仍每轮收到完成通知 | 通知只在接管期间发。更新并重启 OMP 会话后，再执行 release；status 首行应显示“已释放”，实际入站连接“已关闭”，自动推送“已停止”。一台机器上的 release 不改变其他机器上的会话 |
 | 一条通知都没有，但 doctor 全绿 | 多半是配了 Stream 但**还没执行** `/dingtalk takeover`（能接管时通知只在接管期间发，设计行为，不是故障）。纯出站配置（`stream.enabled: false`）不受影响。若 stream 开着但 `control.enabled: false`，配置加载会告警说明通知不会等待接管 |
 | 接管成功、锁和 Stream 都正常，却一条都不推 | 同一个 omp 进程里先跑过别的会话（切会话 / 新建 / 恢复），桥的归属还停在那一个 session 上，于是接管会话自己的事件被当成「外来会话」过滤掉了。已在插件侧修好：顶层会话切换时桥自动改随新会话，接管成功时也会重新绑定；`autoTakeover = true` 时新会话「后来者覆盖」直接接管；子代理（无 UI 的 headless runner）依旧完全静默。**例外**：无 UI 的顶层会话（`omp -p` / ACP / SDK 这类 `rpc`/`json`/`print` 模式）与子代理在宿主暴露的字段上无法区分，不会被自动改绑——在这类会话里执行 `/dingtalk takeover` 即可接手。用 `/dingtalk status` 看「桥绑定会话」是否与当前会话一致，不一致时会直接给出提示。旧版遇到这个现象：退出重开该 omp 会话，或在本会话再执行一次 `/dingtalk takeover` |
 | 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
