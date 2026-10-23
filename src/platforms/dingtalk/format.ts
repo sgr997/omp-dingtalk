@@ -52,7 +52,7 @@ export function decorateMessage(message: Message): Message {
 	// Formatters bake a footer into the text before the bridge knows this run's
 	// token count, so rewrite the existing footer with the freshest label
 	// instead of leaving the stale one in place.
-	const existing = /\n\n---\n<font color="#999999" size="1">omp · [^<]*<\/font>\s*$/;
+	const existing = /\n\n---\n<font color="#999999" size="1">[^<]*<\/font>\s*$/;
 	const text = existing.test(message.text)
 		? message.text.replace(existing, footer())
 		: `${message.text}${footer()}`;
@@ -82,7 +82,7 @@ function footer(): string {
 	// DingTalk does not render a markdown title inside the chat itself. Repeat
 	// the session label here so opening the conversation still tells you which
 	// omp window sent it.
-	const parts = ["omp"];
+	const parts: string[] = [];
 	if (sessionTag) parts.push(sessionTag);
 	if (usageLabel) parts.push(usageLabel);
 	if (contextLabel) parts.push(contextLabel);
