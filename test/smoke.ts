@@ -931,7 +931,7 @@ console.log("\n[12] 会话事件 → 通知");
 	});
 	check(
 		"落款带上下文占用",
-		await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("ctx 35% · 45k/128k")),
+		await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("ctx 35%/128k")),
 		String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(-100),
 	);
 	delete ctx.getContextUsage;

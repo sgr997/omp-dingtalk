@@ -78,7 +78,7 @@ export class Bridge<P extends PlatformConfig> {
 		if (!window) return "";
 		const reported = Number(usage?.percent);
 		const percent = Number.isFinite(reported) ? Math.round(reported) : Math.round((tokens / window) * 100);
-		return `ctx ${percent}% · ${formatTokenCount(tokens)}/${formatTokenCount(window)}`;
+		return `ctx ${percent}%/${formatTokenCount(window)}`;
 	}
 
 	/** Short label of this omp session, prefixed to every pushed title. */
