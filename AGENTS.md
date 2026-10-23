@@ -72,16 +72,20 @@
 ## 3. 安装
 
 ```bash
-omp plugin link <插件绝对路径>
+omp plugin install github:sgr997/omp-dingtalk
 ```
 
-验证（期望无 error，列表里有 `omp-dingtalk`，版本号与你装的 release 一致）：
+升级：重跑同一条命令并加 `--force`。
+
+验证（期望 4 ok / 0 errors，列表里有 `omp-dingtalk`）：
 ```bash
 omp plugin doctor
 omp plugin list
 ```
 
-**Windows 普通用户**建不了符号链接，`link` 会留空目录。用目录联接替代（README.md 第 2 节有现成命令）。
+改源码时用 `omp plugin link <插件绝对路径>` 指向工作目录，改完不用重装。**Windows 普通用户**建不了符号链接，`link` 会留空目录，改用目录联接（README.md 第 2 节有现成命令）。
+
+安装目录：`~/.omp/plugins/node_modules/omp-dingtalk`。
 
 ---
 

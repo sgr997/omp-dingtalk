@@ -8,7 +8,7 @@
 - **入站（控制）**：启用 Stream 后，在 OMP 会话执行 `/dingtalk takeover`，再从钉钉发文字给 omp 下指令、批准/拒绝敏感操作、中断执行、切模型或压缩上下文。
 - **双端提问（可选）**：会话已接管、`question.enabled` 开启且出站通道可用时，模型调用「提问（ask）」会同时显示在终端和钉钉，任一端先作答都算。
 
-零运行时依赖，运行时只使用 Node/Bun 内置模块（`node:crypto`、`node:fs`、`node:path`）和内置全局对象（`Buffer`、`fetch`、`WebSocket`），所以 `omp plugin link` 之后不需要再跑 `bun install`。
+零运行时依赖，运行时只使用 Node/Bun 内置模块（`node:crypto`、`node:fs`、`node:path`）和内置全局对象（`Buffer`、`fetch`、`WebSocket`），装完不需要再跑 `bun install`。
 
 ---
 
@@ -84,21 +84,37 @@
 
 ## 2. 安装
 
+一条命令，从 GitHub 装（公开仓库，不需要 npm 账号、不需要 clone）：
+
 ```bash
-omp plugin link <本插件的绝对路径>
+omp plugin install github:sgr997/omp-dingtalk
 ```
+
+升级到最新版（重跑安装并覆盖）：
+
+```bash
+omp plugin install github:sgr997/omp-dingtalk --force
+```
+
+也可以锁定某个 tag 或 commit：`omp plugin install https://github.com/sgr997/omp-dingtalk#<tag>`。
 
 验证：
 
 ```bash
-omp plugin doctor     # 期望：0 errors
-omp plugin list       # 期望看到 omp-dingtalk，版本与所安装目录的 package.json 一致（当前源码为 0.2.0-pre）
+omp plugin doctor     # 期望：4 ok, 0 errors
+omp plugin list       # 期望看到 omp-dingtalk@<版本>
 ```
 
 <details>
-<summary>Windows 上 <code>link</code> 创建软链接失败怎么办</summary>
+<summary>改源码 / 离线安装</summary>
 
-普通用户没有创建符号链接的权限，`omp plugin link` 会留下一个**空目录**，插件看起来装了其实没生效。用**目录联接**（junction，不需要管理员）替代：
+开发时用 `link` 指向工作目录，改完不用重装：
+
+```bash
+omp plugin link <本插件的绝对路径>
+```
+
+Windows 普通用户建不了符号链接，`link` 会留空目录。用**目录联接**（junction，不需要管理员）替代：
 
 ```powershell
 $link = "$env:USERPROFILE\.omp\plugins\node_modules\omp-dingtalk"
@@ -109,6 +125,8 @@ New-Item -ItemType Junction -Path $link -Target "<本插件的绝对路径>"
 之后 `omp plugin doctor` 应该显示 `plugin:omp-dingtalk` 为绿色。
 </details>
 
+安装目录在 `~/.omp/plugins/node_modules/omp-dingtalk`，需要跑仓库自带脚本（如 `bun run doctor`）时进这个目录。
+
 ---
 
 ## 3. 配置自检（完成第 4 节配置后）
@@ -116,7 +134,7 @@ New-Item -ItemType Junction -Path $link -Target "<本插件的绝对路径>"
 先按第 4 节选好通知或远程控制路径并写入配置，再按本节选择对应的自检命令。不用启动 omp 或配置模型凭据，就能检查钉钉出站和 Stream 连通性。默认会**真实发送一条测试通知**；若 Stream 已启用，还会临时另开一个 Stream 连接。请在执行 `/dingtalk takeover` 之前运行；已有会话正在接管时，自检连接会与它并存，钉钉可能把入站消息交给自检连接。
 
 ```bash
-cd <本插件的绝对路径>
+cd ~/.omp/plugins/node_modules/omp-dingtalk   # 源码安装时换成你的工作目录
 bun run doctor
 ```
 
@@ -559,21 +577,20 @@ bun run lint        # oxlint（0 警告）
 
 ## 10. 分发到其他电脑
 
-**把目录拷过去，或从源码装。** 插件是零运行时依赖的——没有 `node_modules`，不需要 `npm install`，代码里也没有硬编码路径或平台特定逻辑（Windows / macOS / Linux 都能跑）。
+插件零运行时依赖（没有 `node_modules`，不需要 `npm install`），也没有硬编码路径或平台特定逻辑，Windows / macOS / Linux 都能直接跑。
 
-### 手动安装
+### 安装
 
-1. 下载 Release 资产：
-   ```bash
-   curl -fsSL -o omp-dingtalk.tar.gz \
-     https://github.com/sgr997/omp-dingtalk/releases/download/v0.1.0/omp-dingtalk-0.1.0.tar.gz
-   ```
-2. 解压到任意目录，比如 `~/tools/omp-dingtalk`
-3. `omp plugin link ~/tools/omp-dingtalk`
-4. `mkdir -p ~/.omp && cp ~/tools/omp-dingtalk/config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json`，然后填凭据（样例里 `webhook.url` 与 stream 凭据都是空的，`doctor` 会提示还缺什么）
-5. `cd ~/tools/omp-dingtalk && bun run doctor`
+```bash
+omp plugin install github:sgr997/omp-dingtalk
+```
 
-（Windows 普通用户建不了符号链接时，按第 2 节的 junction 办法处理。）
+然后：
+
+1. `mkdir -p ~/.omp && cp ~/.omp/plugins/node_modules/omp-dingtalk/config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json`，填凭据（样例里 `webhook.url` 与 stream 凭据都是空的，`doctor` 会提示还缺什么）
+2. `cd ~/.omp/plugins/node_modules/omp-dingtalk && bun run doctor` 自检
+
+要改源码或离线部署时，把目录拷过去后 `omp plugin link <目录>`（Windows 建不了符号链接时按第 2 节的 junction 办法处理）。
 
 前提是新电脑已经装了 omp，**并且 omp 配好了模型凭据**——否则插件装了也没有会话可挂。
 
