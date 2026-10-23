@@ -148,6 +148,18 @@ export interface ChannelFormatter {
 	approvalResolved(info: { id: string; approved: boolean; by: string; note?: string }): Message;
 	approvalBlocked(info: { id: string; toolName: string; detail: string; timeoutMs: number }): string;
 	approvalTimeout(info: { id: string; toolName: string; released: boolean; timeoutMs: number }): string;
+	/**
+	 * Text for the local (terminal) approval dialog when the same request is also
+	 * pushed to the channel. Core owns the race; the platform owns the wording,
+	 * because only it knows what to call itself.
+	 */
+	localApprovalPrompt(info: {
+		toolName: string;
+		reason: string;
+		detail: string;
+		timeoutMs: number;
+		autoDecision: "allow" | "deny";
+	}): { title: string; message: string };
 	questionRequest(info: ChannelQuestionPack & { id: string }): Message;
 	questionAnsweredLocally(info: { id: string; questions: RemoteQuestion[] }): Message;
 	questionTimeout(info: { id: string; questions: RemoteQuestion[]; timeoutMs: number }): Message;

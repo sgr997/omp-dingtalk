@@ -503,6 +503,28 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				onExpired: (a, decision) => b.approvalExpired(a, decision),
 				duplicate: (a) => b.log.info(`审批去重：复用 ${a.id}，不再重复推送`),
 			});
+
+			// Dual surface: when the host has an interactive dialog, show the same
+			// request locally and let the first answer (terminal or channel) decide.
+			// Headless sessions keep the immediate-block path below, because nobody
+			// could answer a local dialog there.
+			if ((ctx as { ui?: { confirm?: unknown } } | undefined)?.ui?.confirm) {
+				const decision = await b.raceLocalApproval(ctx, approval, {
+					toolName,
+					reason,
+					detail,
+					timeoutMs: b.cfg.approval.timeoutMs,
+					onTimeout: b.cfg.approval.onTimeout,
+				});
+				if (decision === "approve") return undefined;
+				if (decision === "deny") {
+					return { block: true, reason: `已在本地终端拒绝执行 ${toolName}（审批编号 ${approval.id}）。` };
+				}
+				// Timeout with no answer: the configured policy decides.
+				if (b.cfg.approval.onTimeout === "allow") return undefined;
+				return { block: true, reason: `审批超时（${Math.round(b.cfg.approval.timeoutMs / 1000)}s 无答复），已按安全默认拒绝 ${toolName}（编号 ${approval.id}）。` };
+			}
+
 			return {
 				block: true,
 				reason: b.formatter.approvalBlocked({ id: approval.id, toolName, detail, timeoutMs: b.cfg.approval.timeoutMs }),

@@ -225,6 +225,31 @@ export function formatApprovalTimeout(info: { id: string; toolName: string; rele
 		: `（钉钉远程审批 #${info.id} 超时未收到回复（${Math.round(info.timeoutMs / 1000)}s），已按安全默认拒绝。不要执行该操作。）`;
 }
 
+/**
+ * Local dialog text for a dual-surface approval. The same request is pushed to
+ * DingTalk, so the wording names both surfaces and says either answer counts.
+ */
+export function fmtLocalApprovalPrompt(info: {
+	toolName: string;
+	reason: string;
+	detail: string;
+	timeoutMs: number;
+	autoDecision: "allow" | "deny";
+}): { title: string; message: string } {
+	const auto = info.autoDecision === "allow" ? "放行" : "拒绝";
+	return {
+		title: `命令审批 · ${info.toolName}`,
+		message: [
+			`工具：${info.toolName}`,
+			`原因：${info.reason}`,
+			"",
+			truncate(info.detail, 900),
+			"",
+			`钉钉与本机同时在等待答复，任一端先答都算。${Math.round(info.timeoutMs / 1000)} 秒内无人答复则自动${auto}。`,
+		].join("\n"),
+	};
+}
+
 type QuestionPack = {
 	id: string;
 	questions: Array<{

@@ -31,15 +31,37 @@ export class ApprovalRegistry {
 	#pending = new Map<string, PendingEntry>();
 	#latest: string | undefined;
 	/**
+	 * Called whenever a pending request is settled by an explicit reply, so the
+	 * bridge can close the competing local dialog. `by` names the surface that
+	 * answered ("remote" for the channel router, "local" for the TUI dialog).
+	 */
+	#onSettled: ((approval: PendingApproval, decision: "approve" | "deny", by: string) => void) | undefined;
+	/**
 	 * Payload keys the user approved; released once on the next matching call.
 	 * Values are expiry timestamps — a release the model never picked up must
 	 * not stay valid indefinitely, or a much later call with identical
 	 * arguments would run without a fresh approval.
 	 */
 	#approved = new Map<string, number>();
+	/**
+	 * Requests whose `tool_call` handler is still awaiting a dual-surface race.
+	 * A channel reply settles that handler directly, so the router must not also
+	 * inject a follow-up message for it.
+	 */
+	#racing = new Set<string>();
 
-	constructor(logger: Logger) {
+	constructor(logger: Logger, onSettled?: (approval: PendingApproval, decision: "approve" | "deny", by: string) => void) {
 		this.#log = logger;
+		this.#onSettled = onSettled;
+	}
+
+	/** Mark a request as having a live handler awaiting the race. */
+	markRacing(id: string): void {
+		this.#racing.add(id);
+	}
+
+	unmarkRacing(id: string): void {
+		this.#racing.delete(id);
 	}
 
 	get size(): number {
@@ -106,7 +128,7 @@ export class ApprovalRegistry {
 	}
 
 	/** Settle a request by explicit id, or the most recent one when id is omitted. */
-	resolve(target: string | undefined, decision: "approve" | "deny"): { ok: boolean; approval?: PendingApproval; error?: string } {
+	resolve(target: string | undefined, decision: "approve" | "deny", by = "remote"): { ok: boolean; approval?: PendingApproval; error?: string; racing?: boolean } {
 		const id = (target ?? "").trim().toUpperCase() || this.#latest;
 		if (!id) return { ok: false, error: "当前没有待审批的请求" };
 		const entry = this.#pending.get(id);
@@ -114,10 +136,13 @@ export class ApprovalRegistry {
 			const known = [...this.#pending.keys()];
 			return { ok: false, error: known.length ? `找不到编号 ${id}，当前待审批：${known.join(", ")}` : `找不到编号 ${id}` };
 		}
+		const racing = this.#racing.has(id);
 		this.#pending.delete(id);
 		if (this.#latest === id) this.#latest = undefined;
 		if (decision === "approve") this.#approved.set(entry.key, Date.now() + entry.timeoutMs);
-		return { ok: true, approval: publicApproval(entry) };
+		const approval = publicApproval(entry);
+		this.#onSettled?.(approval, decision, by);
+		return { ok: true, approval, racing };
 	}
 
 	/** Drop every pending request — used when the session goes away. */

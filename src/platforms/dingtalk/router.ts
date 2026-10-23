@@ -228,6 +228,10 @@ export class CommandRouter {
 
 		// The model was told to stop and wait; hand it the decision so an
 		// approved call can be re-issued (and released by the registry).
+		// When a `tool_call` handler is still awaiting the dual-surface race, the
+		// decision settles that handler directly — injecting it as well would make
+		// the model run the same call twice.
+		if (result.racing) return;
 		if (!this.#active()) return;
 		this.#deps.pi.sendUserMessage(
 			formatApprovalInjection({ id: approval.id, toolName: approval.toolName, detail: approval.detail, approved: approve, by }),

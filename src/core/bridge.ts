@@ -99,6 +99,16 @@ export class Bridge<P extends PlatformConfig> {
 	/** Last inbound message — used to react with ✅/❌ on session_stop. */
 	#lastInboundTarget: Record<string, unknown> | undefined;
 	/**
+	 * Dual-surface approvals: one deferred per request, settled by whichever
+	 * surface answers first (local dialog or channel reply). Kept outside the
+	 * registry so the registry stays free of promise bookkeeping.
+	 */
+	#approvalSettlers = new Map<string, (decision: "approve" | "deny" | "timeout") => void>();
+	/** Abort handles for local dialogs, so a channel reply can close them. */
+	#localApprovalAborts = new Map<string, AbortController>();
+	/** Ids whose `tool_call` handler is still awaiting the race. */
+	#racingApprovals = new Set<string>();
+	/**
 	 * Set when the run ends with an unrecovered error (`auto_retry_end` with
 	 * success=false). `session_stop` consumes it to pick ❌ instead of ✅, then
 	 * resets it so the next run starts clean.
@@ -113,7 +123,14 @@ export class Bridge<P extends PlatformConfig> {
 		this.quiet = this.cfg.quiet;
 		this.log = createLogger((pi as unknown as { logger?: unknown }).logger);
 		// Registries are reused, but owner/config changes explicitly cancel entries.
-		this.approvals = new ApprovalRegistry(this.log);
+		this.approvals = new ApprovalRegistry(this.log, (approval, decision, by) => {
+			// Whichever surface answered, release the waiting race. A channel reply
+			// also closes the local dialog so the human is not asked twice.
+			this.#approvalSettlers.get(approval.id)?.(decision);
+			this.#approvalSettlers.delete(approval.id);
+			if (by !== "local") this.#localApprovalAborts.get(approval.id)?.abort();
+			this.#localApprovalAborts.delete(approval.id);
+		});
 		this.questions = new QuestionRegistry(this.log);
 		this.sender = adapter.createSender(this.activeCfg, this.log);
 		this.router = this.#buildRouter();
@@ -482,9 +499,90 @@ export class Bridge<P extends PlatformConfig> {
 		);
 	}
 
+	/**
+	 * Race the local approval dialog against a channel reply for one request.
+	 *
+	 * Only called when the host exposes an interactive `ctx.ui.confirm` — a
+	 * headless session keeps the old immediate-block behaviour, because nobody
+	 * could answer the local dialog. The first answer wins: a channel reply
+	 * aborts the dialog, a local answer settles the registry so a later channel
+	 * reply reports "no pending approval" instead of double-answering.
+	 *
+	 * Returns the winning decision, or `"timeout"` when the configured window
+	 * elapsed without an answer.
+	 */
+	async raceLocalApproval(
+		ctx: unknown,
+		approval: PendingApproval,
+		info: { toolName: string; reason: string; detail: string; timeoutMs: number; onTimeout: "deny" | "allow" },
+	): Promise<"approve" | "deny" | "timeout"> {
+		const ui = (ctx as { ui?: { confirm?: (title: string, message: string, options?: Record<string, unknown>) => Promise<boolean> } } | undefined)?.ui;
+		if (!ui?.confirm) return "timeout";
+
+		const remote = new Promise<"approve" | "deny" | "timeout">((resolve) => {
+			this.#approvalSettlers.set(approval.id, resolve);
+		});
+		const abort = new AbortController();
+		this.#localApprovalAborts.set(approval.id, abort);
+		this.#racingApprovals.add(approval.id);
+		this.approvals.markRacing(approval.id);
+
+		const prompt = this.formatter.localApprovalPrompt({
+			toolName: info.toolName,
+			reason: info.reason,
+			detail: info.detail,
+			timeoutMs: info.timeoutMs,
+			autoDecision: info.onTimeout,
+		});
+
+		const local = Promise.resolve(ui.confirm(prompt.title, prompt.message, { signal: abort.signal }))
+			.then((ok) => (ok ? ("approve" as const) : ("deny" as const)))
+			// Aborted by a channel reply (or by the handler deadline): not an answer.
+			// Any other rejection is the human dismissing the dialog — a refusal.
+			.catch(() => (abort.signal.aborted ? ("timeout" as const) : ("deny" as const)));
+
+		let winner: "approve" | "deny" | "timeout";
+		try {
+			winner = await Promise.race([local, remote]);
+		} finally {
+			this.#racingApprovals.delete(approval.id);
+			this.approvals.unmarkRacing(approval.id);
+			this.#approvalSettlers.delete(approval.id);
+			this.#localApprovalAborts.delete(approval.id);
+		}
+
+		// A local answer has not gone through the registry yet: settle it so the
+		// pending entry disappears and the channel gets a result card.
+		if (winner !== "timeout" && this.approvals.has(approval.id)) {
+			const settled = this.approvals.resolve(approval.id, winner, "local");
+			if (settled.ok) {
+				this.log.info(`审批 ${approval.id} 已在本地${winner === "approve" ? "批准" : "拒绝"}`);
+				this.notify(
+					this.formatter.approvalResolved({ id: approval.id, approved: winner === "approve", by: "本地终端" }),
+					{ priority: "normal", bypassQuiet: true },
+				);
+			}
+		}
+		return winner;
+	}
+
 	/** An approval timed out: tell omp the outcome so the turn never hangs. */
 	approvalExpired(approval: PendingApproval, decision: ApprovalDecision): void {
 		const released = decision === "approve";
+		// A handler is still awaiting this request: it returns the outcome itself,
+		// so injecting a follow-up message would report the timeout twice.
+		if (this.#racingApprovals.has(approval.id)) {
+			this.log.info(`远程审批 ${approval.id} 超时，交回等待中的工具调用处理`, { toolName: approval.toolName });
+			this.#approvalSettlers.get(approval.id)?.("timeout");
+			this.#approvalSettlers.delete(approval.id);
+			this.#localApprovalAborts.get(approval.id)?.abort();
+			this.#localApprovalAborts.delete(approval.id);
+			this.notify(
+				this.formatter.approvalResolved({ id: approval.id, approved: released, by: "超时" }),
+				{ priority: "normal", bypassQuiet: true },
+			);
+			return;
+		}
 		this.log.info(`远程审批 ${approval.id} 超时，按 ${released ? "配置放行" : "安全默认拒绝"} 处理`, { toolName: approval.toolName });
 		try {
 			this.#pi.sendUserMessage(

@@ -501,6 +501,49 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	check("放行是一次性的：不同命令仍被拦截", other?.block === true, other);
 }
 
+console.log("\n[6.1] 双端审批：本地对话框与钉钉同时等待，任一端先答");
+{
+	const localApprovals: Array<{ title: string; message: string; resolve: (v: boolean) => void; aborted: boolean }> = [];
+	ctx.ui.confirm = (title: string, message: string, options?: { signal?: AbortSignal }) =>
+		new Promise<boolean>((resolve) => {
+			const record = { title, message, resolve, aborted: false };
+			options?.signal?.addEventListener("abort", () => {
+				record.aborted = true;
+			});
+			localApprovals.push(record);
+		});
+	try {
+		// Local answers first: the call runs immediately, no model re-issue needed.
+		const before = approvalPosts().length;
+		const pending = fire("tool_call", { type: "tool_call", toolCallId: "t-dual-local", toolName: "bash", input: { command: "sudo rm -rf /dual-local" } });
+		check("双端审批：本地对话框弹出", await waitFor(() => localApprovals.length >= 1));
+		check("双端审批：钉钉卡片同时推送", await waitFor(() => approvalPosts().length > before));
+		check("双端审批：本地框说明两端都在等", Boolean(localApprovals[0]?.message.includes("钉钉与本机")), localApprovals[0]?.message);
+		localApprovals[0].resolve(true);
+		const [localResult] = await pending;
+		check("双端审批：本地批准后直接放行", !localResult || localResult.block !== true, localResult);
+		check(
+			"双端审批：本地处理结果回报钉钉",
+			await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("本地终端")),
+			String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 160),
+		);
+
+		// Channel answers first: the local dialog must be closed, not left hanging.
+		const before2 = approvalPosts().length;
+		const pending2 = fire("tool_call", { type: "tool_call", toolCallId: "t-dual-remote", toolName: "bash", input: { command: "sudo rm -rf /dual-remote" } });
+		check("双端审批：第二次本地框弹出", await waitFor(() => localApprovals.length >= 2));
+		check("双端审批：第二次钉钉卡推送", await waitFor(() => approvalPosts().length > before2));
+		const injectedBefore = sentPrompts.length;
+		live.robot("同意");
+		const [remoteResult] = await pending2;
+		check("双端审批：钉钉批准后直接放行", !remoteResult || remoteResult.block !== true, remoteResult);
+		check("双端审批：钉钉先答会关闭本地框", localApprovals[1]?.aborted === true);
+		check("双端审批：钉钉先答不再注入重复放行指令", sentPrompts.length === injectedBefore, sentPrompts.length - injectedBefore);
+	} finally {
+		delete ctx.ui.confirm;
+	}
+}
+
 console.log("\n[7] 远程审批：拒绝");
 {
 	const [blocked] = await fire("tool_call", { type: "tool_call", toolCallId: "t-deny", toolName: "bash", input: { command: "git push --force origin main" } });
