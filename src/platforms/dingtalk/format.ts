@@ -41,9 +41,12 @@ export function getSessionTag(): string {
 }
 
 function footer(): string {
-	// The session label lives in the message title as a badge; repeating it here
-	// only adds noise to every card.
-	return `\n\n---\n<font color="#999999" size="1">omp · ${stamp()}</font>`;
+	// The title badge is only shown in the conversation list / notification;
+	// DingTalk does not render a markdown title inside the chat itself. Repeat
+	// the session label here so opening the conversation still tells you which
+	// omp window sent it.
+	const label = sessionTag ? `omp · ${sessionTag} · ${stamp()}` : `omp · ${stamp()}`;
+	return `\n\n---\n<font color="#999999" size="1">${label}</font>`;
 }
 
 /** One-line "where did this come from", for messages that carry no footer. */

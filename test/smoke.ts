@@ -901,6 +901,8 @@ console.log("\n[12] 会话事件 → 通知");
 	// signed. (Previously asserted on the startup push, which no longer exists.)
 	const signedPost = requests.find((r) => r.url.includes("/robot/send?"));
 	check("webhook URL 带上了加签参数", Boolean(signedPost?.url.includes("timestamp=") && signedPost?.url.includes("sign=")), signedPost?.url);
+	const noteText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
+	check("正文落款也带会话名（钉钉聊天里不渲染标题）", noteText.includes("omp · smoke-session · "), noteText.slice(-80));
 	check(
 		"通知标题带上了会话名角标",
 		String(webhookPosts().at(-1)?.body?.markdown?.title ?? "").startsWith("[smoke-session] "),
