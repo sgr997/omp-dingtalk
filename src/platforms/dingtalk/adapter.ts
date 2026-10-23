@@ -55,6 +55,7 @@ import {
 	fmtTurnEnd,
 	setSessionTag,
 	setUsageLabel,
+	setContextLabel,
 } from "./format";
 import { CommandRouter, type RouterDeps } from "./router";
 
@@ -198,6 +199,7 @@ class AdapterRouter implements ChannelRouter {
 const formatter: ChannelFormatter = {
 	setSessionTag,
 	setUsageLabel,
+	setContextLabel,
 	takeoverSuccess: (info) => fmtTakeoverSuccess(info as Parameters<typeof fmtTakeoverSuccess>[0]),
 	sessionStop: (info) => fmtSessionStop(info),
 	turnEnd: (info) => fmtTurnEnd(info),

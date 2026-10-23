@@ -920,6 +920,22 @@ console.log("\n[12] 会话事件 → 通知");
 		await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("deepseek-v4-flash · 500 tok")),
 	);
 
+	// Context occupancy comes from ctx.getContextUsage(), which the host reports
+	// as tokens + window size; both are formatted with k/m suffixes.
+	ctx.getContextUsage = () => ({ tokens: 45000, contextWindow: 128000, percent: 35 });
+	await fire("turn_end", {
+		type: "turn_end",
+		turnIndex: 3,
+		message: { role: "assistant", model: "deepseek-v4-flash", usage: { totalTokens: 600 }, content: [{ type: "text", text: "第三轮" }] },
+		toolResults: [],
+	});
+	check(
+		"落款带上下文占用",
+		await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("ctx 35% · 45k/128k")),
+		String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(-100),
+	);
+	delete ctx.getContextUsage;
+
 	// Two sessions sharing one DingTalk account must still be tellable apart, so
 	// every notification carries `目录名·随机短码`; and every webhook post is
 	// signed. (Previously asserted on the startup push, which no longer exists.)

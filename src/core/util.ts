@@ -19,6 +19,15 @@ export function b64Decode(input: string): string {
 }
 
 /** Truncate with an ellipsis, never returning a longer string than `max`. */
+/** `45000` → `45k`, `128000` → `128k`, `1200000` → `1.2m`. */
+export function formatTokenCount(value: unknown): string {
+	const n = Number(value ?? 0);
+	if (!Number.isFinite(n) || n <= 0) return "0";
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+	if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	return String(Math.round(n));
+}
+
 export function truncate(text: unknown, max: number): string {
 	const value = typeof text === "string" ? text : text == null ? "" : String(text);
 	if (value.length <= max) return value;

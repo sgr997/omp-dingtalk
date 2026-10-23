@@ -147,6 +147,8 @@ export interface ChannelFormatter {
 	setSessionTag(tag: string): void;
 	/** Model + this-run token usage shown in the footer. */
 	setUsageLabel?(label: string): void;
+	/** Context-window occupancy shown in the footer. */
+	setContextLabel?(label: string): void;
 	takeoverSuccess(info: { cwd: string; robot?: string; scope: string; preempted?: { cwd: string; pid: number }; releaseSeconds?: number }): Message;
 	sessionStop(info: { durationMs: number; turns: number; text: string }): Message;
 	turnEnd(info: { turnIndex: number; durationMs: number; text?: string; tools?: string[] }): Message;

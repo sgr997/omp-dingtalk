@@ -16,7 +16,7 @@ import { ApprovalRegistry, type ApprovalDecision, type PendingApproval } from ".
 import { hashQuestions, QuestionRegistry, type PendingQuestion, type QuestionAnswerPayload } from "./questions";
 import { heartbeatMs, TakeoverLock, type LockHolder } from "./lock";
 import { createLogger, type Logger } from "./logger";
-import { extractText, safeJson, splitMessage, truncate, truncatePath } from "./util";
+import { formatTokenCount, extractText, safeJson, splitMessage, truncate, truncatePath } from "./util";
 import type { ApiLike, CtxLike } from "./pi-types-shared";
 import type { ApprovalRule } from "./approval-types";
 import { createHash } from "node:crypto";
@@ -68,6 +68,17 @@ export class Bridge<P extends PlatformConfig> {
 		if (!model && !total) return "";
 		const tokens = total >= 1000 ? `${(total / 1000).toFixed(1)}k tok` : `${total} tok`;
 		return model ? `${model} · ${tokens}` : tokens;
+	}
+
+	/** `ctx 34% · 45k/128k`, or "" when the host reports no window size. */
+	get contextLabel(): string {
+		const usage = this.ctx?.getContextUsage?.();
+		const tokens = Number(usage?.tokens ?? 0);
+		const window = Number(usage?.contextWindow ?? 0);
+		if (!window) return "";
+		const reported = Number(usage?.percent);
+		const percent = Number.isFinite(reported) ? Math.round(reported) : Math.round((tokens / window) * 100);
+		return `ctx ${percent}% · ${formatTokenCount(tokens)}/${formatTokenCount(window)}`;
 	}
 
 	/** Short label of this omp session, prefixed to every pushed title. */
@@ -330,6 +341,7 @@ export class Bridge<P extends PlatformConfig> {
 		// keep it in step with the bridge's own copy.
 		this.formatter.setSessionTag?.(this.sessionTag);
 		this.formatter.setUsageLabel?.(this.usageLabel);
+		this.formatter.setContextLabel?.(this.contextLabel);
 		const badged = this.sessionTag ? `[${this.sessionTag}] ${message.title}` : message.title;
 		// The sender appends a footer (session label + time) to every delivered
 		// message, so the chunk budget has to leave room for it or a full-size

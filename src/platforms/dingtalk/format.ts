@@ -65,10 +65,16 @@ export function getSessionTag(): string {
 }
 
 let usageLabel = "";
+let contextLabel = "";
 
 /** `deepseek-v4-flash · 12.3k tok`, or "" when the host reported nothing. */
 export function setUsageLabel(label: string): void {
 	usageLabel = label;
+}
+
+/** `ctx 34% · 45k/128k`, or "" when the host reports no window size. */
+export function setContextLabel(label: string): void {
+	contextLabel = label;
 }
 
 function footer(): string {
@@ -79,6 +85,7 @@ function footer(): string {
 	const parts = ["omp"];
 	if (sessionTag) parts.push(sessionTag);
 	if (usageLabel) parts.push(usageLabel);
+	if (contextLabel) parts.push(contextLabel);
 	parts.push(stamp());
 	return `\n\n---\n<font color="#999999" size="1">${parts.join(" · ")}</font>`;
 }

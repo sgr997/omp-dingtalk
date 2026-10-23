@@ -24,4 +24,6 @@ export interface CtxLike {
 	models?: { resolve: (spec: string) => unknown; current: () => unknown };
 	model?: { id?: string; provider?: string } | undefined;
 	cwd?: string;
+	/** Current context-window occupancy for the active model. */
+	getContextUsage?: () => { tokens?: number; contextWindow?: number; percent?: number } | undefined;
 }
