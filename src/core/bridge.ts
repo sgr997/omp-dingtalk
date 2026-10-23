@@ -730,8 +730,14 @@ export class Bridge<P extends PlatformConfig> {
 	buildSessionTag(): string {
 		const name = this.#pi.getSessionName?.()?.trim();
 		if (name) {
-			this.sessionTag = name.replace(/[\r\n]+/g, " ").replace(/[[\]]/g, "").slice(0, 20);
-			return this.sessionTag;
+			// The badge sits in a markdown title: drop characters that would
+			// restyle or break it, then keep it short enough that the real title
+			// still fits on a phone notification.
+			const cleaned = name.replace(/[\r\n]+/g, " ").replace(/[[\]*_`#>|~]/g, "").trim().slice(0, 16);
+			if (cleaned) {
+				this.sessionTag = cleaned;
+				return cleaned;
+			}
 		}
 		const dir = basename(this.cwd) || "omp";
 		const seed = `${this.cwd}|${process.pid}`;
