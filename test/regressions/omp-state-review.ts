@@ -28,7 +28,7 @@ globalThis.fetch = (async (input: any, init: any = {}) => {
   const url = String(input);
   const body = init.body ? JSON.parse(init.body) : {};
   calls.push({ url, body, headers: init.headers });
-  if (body.msgParam && JSON.parse(body.msgParam).title === holdTitle) {
+  if (holdTitle && body.msgParam && String(JSON.parse(body.msgParam).title ?? '').endsWith(holdTitle)) {
     await new Promise<void>(resolve => releaseHold = resolve);
   }
   const data = url.includes('/gateway/') ? { endpoint: 'wss://fake.invalid', ticket: 'fake' }

@@ -22,6 +22,7 @@
 import type { DingTalkConfig } from "./config";
 import type { Logger } from "../../core/logger";
 import { hmacSha256Base64, sleep } from "../../core/util";
+import { decorateMessage } from "./format";
 
 export interface SendOptions {
 	title: string;
@@ -331,6 +332,10 @@ export class DingTalkSender {
 
 	async #deliver(opts: SendOptions, target?: DingTalkConfig): Promise<SendResult> {
 		const cfg = target ?? this.#cfg;
+		// Every outbound message gets the session badge and footer here, so
+		// command replies and receipts are labelled exactly like notifications.
+		const decorated = decorateMessage({ title: opts.title, text: opts.text });
+		opts = { ...opts, title: decorated.title, text: decorated.text };
 		const valid = () => (target !== undefined || cfg === this.#cfg) && (opts.isStillValid?.() ?? true);
 		const channels = this.#channels(cfg);
 		const results: SendResult[] = [];

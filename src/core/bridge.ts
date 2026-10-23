@@ -294,8 +294,16 @@ export class Bridge<P extends PlatformConfig> {
 		// two windows are talking into the same DingTalk account.
 		// Re-read it on every push: the user can rename a session mid-run.
 		this.buildSessionTag();
+		// The sender decorates command replies from the platform formatter's tag;
+		// keep it in step with the bridge's own copy.
+		this.formatter.setSessionTag?.(this.sessionTag);
 		const badged = this.sessionTag ? `[${this.sessionTag}] ${message.title}` : message.title;
-		const chunks = splitMessage(message.text, this.cfg.notify.maxTextChars);
+		// The sender appends a footer (session label + time) to every delivered
+		// message, so the chunk budget has to leave room for it or a full-size
+		// chunk ends up over the platform limit.
+		const footerReserve = 64;
+		const chunkBudget = Math.max(64, this.cfg.notify.maxTextChars - footerReserve);
+		const chunks = splitMessage(message.text, chunkBudget);
 		for (let i = 0; i < chunks.length; i++) {
 			const part = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
 			this.sender.enqueue({

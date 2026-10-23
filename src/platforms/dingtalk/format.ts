@@ -35,6 +35,24 @@ export function setSessionTag(tag: string): void {
 	sessionTag = tag;
 }
 
+/**
+ * Stamp the session label onto a message right before it leaves the process.
+ *
+ * `title` is only shown in the conversation list, and DingTalk does not render
+ * a markdown title inside the chat, so the footer carries the same label. This
+ * runs in the sender, which is the one place every outbound message passes
+ * through — notifications, command replies, takeover receipts and test sends
+ * all end up here.
+ */
+export function decorateMessage(message: Message): Message {
+	const tag = sessionTag;
+	if (!tag) return message;
+	const prefix = `[${tag}] `;
+	const title = message.title.startsWith(prefix) ? message.title : `${prefix}${message.title}`;
+	const text = message.text.includes(`omp · ${tag} ·`) ? message.text : `${message.text}${footer()}`;
+	return { title, text };
+}
+
 /** `目录名·a1b2`, or "" before a session has been labelled. */
 export function getSessionTag(): string {
 	return sessionTag;
