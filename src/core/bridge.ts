@@ -40,6 +40,8 @@ export class Bridge<P extends PlatformConfig> {
 	router: ChannelRouter;
 
 	quiet: boolean;
+	/** Short label of this omp session, prefixed to every pushed title. */
+	sessionTag = "";
 	/** Explicit release suppresses new pushes until a successful local takeover. */
 	notificationsReleased = false;
 	/**
@@ -287,11 +289,17 @@ export class Bridge<P extends PlatformConfig> {
 		// `maxTextChars` is the per-message budget, not the total.
 		const authorityValid = this.captureSendValidity(options);
 		const isStillValid = () => authorityValid() && (options.isStillValid?.() ?? true);
+		// Every push carries the session label as a title badge. The footer used
+		// to hold it, but a line of 10px grey text is not what you scan for when
+		// two windows are talking into the same DingTalk account.
+		// Re-read it on every push: the user can rename a session mid-run.
+		this.buildSessionTag();
+		const badged = this.sessionTag ? `[${this.sessionTag}] ${message.title}` : message.title;
 		const chunks = splitMessage(message.text, this.cfg.notify.maxTextChars);
 		for (let i = 0; i < chunks.length; i++) {
 			const part = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : "";
 			this.sender.enqueue({
-				title: `${message.title}${part}`,
+				title: `${badged}${part}`,
 				text: chunks[i],
 				priority: options.priority ?? "normal",
 				// Each chunk needs its own dedupe key, or the second one would
@@ -711,12 +719,25 @@ export class Bridge<P extends PlatformConfig> {
 		this.stream.start();
 	}
 
-	/** A short label identifying this session in every notification it sends. */
+	/**
+	 * A short label identifying this session in every notification it sends.
+	 *
+	 * The omp session name wins when the session has one: it is what the user
+	 * typed in the TUI, so it is the only label they can map back to a window.
+	 * Unnamed sessions fall back to `directory·hash`, which is stable per
+	 * process and still distinguishes two windows in the same directory.
+	 */
 	buildSessionTag(): string {
+		const name = this.#pi.getSessionName?.()?.trim();
+		if (name) {
+			this.sessionTag = name.replace(/[\r\n]+/g, " ").replace(/[[\]]/g, "").slice(0, 20);
+			return this.sessionTag;
+		}
 		const dir = basename(this.cwd) || "omp";
-		const seed = `${this.#pi.getSessionName?.() ?? ""}|${this.cwd}|${process.pid}`;
+		const seed = `${this.cwd}|${process.pid}`;
 		const short = createHash("sha1").update(seed).digest("hex").slice(0, 4);
-		return `${dir}·${short}`;
+		this.sessionTag = `${dir}·${short}`;
+		return this.sessionTag;
 	}
 
 	/** (Re)create the lock if the app credential changed since we last took over. */

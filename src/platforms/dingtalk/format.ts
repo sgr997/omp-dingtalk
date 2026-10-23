@@ -41,8 +41,9 @@ export function getSessionTag(): string {
 }
 
 function footer(): string {
-	const label = sessionTag ? `omp · ${sessionTag} · ${stamp()}` : `omp · ${stamp()}`;
-	return `\n\n---\n<font color="#999999" size="1">${label}</font>`;
+	// The session label lives in the message title as a badge; repeating it here
+	// only adds noise to every card.
+	return `\n\n---\n<font color="#999999" size="1">omp · ${stamp()}</font>`;
 }
 
 /** One-line "where did this come from", for messages that carry no footer. */

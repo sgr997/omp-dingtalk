@@ -12,7 +12,7 @@
  */
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { splitMessage } from "../src/core/util";
 
 // --- environment must be set before the plugin modules are imported ---------
@@ -471,6 +471,7 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	check("审批通知里带了编号", Boolean(id), id);
 	const approvalTitle = String(approvalPosts().at(-1)?.body?.markdown?.title ?? "");
 	check("审批标题用操作内容而不是编号", !approvalTitle.includes(id) && approvalTitle.includes("rm -rf"), approvalTitle);
+	check("审批标题也带会话名角标", approvalTitle.startsWith("[smoke-session] "), approvalTitle);
 	check(
 		"审批编号在正文第二行",
 		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").split("\n")[1]?.includes(id) === true,
@@ -480,7 +481,7 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	// otherwise a request from a *different* session looks like it is yours.
 	check(
 		"审批通知点明了来自哪个会话",
-		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").includes(`来自**: \`${basename(process.cwd())}·`),
+		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").includes("来自**: `smoke-session`"),
 		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").slice(0, 200),
 	);
 	// While pending, a re-issued call is still blocked (deduped, no re-notify).
@@ -900,8 +901,11 @@ console.log("\n[12] 会话事件 → 通知");
 	// signed. (Previously asserted on the startup push, which no longer exists.)
 	const signedPost = requests.find((r) => r.url.includes("/robot/send?"));
 	check("webhook URL 带上了加签参数", Boolean(signedPost?.url.includes("timestamp=") && signedPost?.url.includes("sign=")), signedPost?.url);
-	const noteText = String(webhookPosts().at(-1)?.body?.markdown?.text ?? "");
-	check("通知带上了会话标识", noteText.includes(`omp · ${basename(process.cwd())}·`), noteText.slice(-90));
+	check(
+		"通知标题带上了会话名角标",
+		String(webhookPosts().at(-1)?.body?.markdown?.title ?? "").startsWith("[smoke-session] "),
+		webhookPosts().at(-1)?.body?.markdown?.title,
+	);
 
 	// The reply must render as markdown, not as a fenced code block: a fence makes
 	// DingTalk show the raw source in a monospace grey box.
@@ -952,7 +956,7 @@ console.log("\n[12] 会话事件 → 通知");
 	// Match the exact title: a loose `includes("空闲")` also matches the `/stop`
 	// reply "ℹ️ omp 本来就空闲", which would let this pass without the session_stop
 	// notification ever being delivered.
-	check("session_stop 触发空闲通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title) === "omp 空闲中")));
+	check("session_stop 触发空闲通知", await waitFor(() => webhookPosts().some((r) => String(r.body?.markdown?.title).includes("omp 空闲中"))));
 
 	// A clean run reacts ✅ to the inbound message that drove it; a run that
 	// ended on an unrecovered error reacts ❌ instead. The stream already
