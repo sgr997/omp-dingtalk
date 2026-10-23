@@ -136,9 +136,9 @@ globalThis.fetch = (async (input: any, init?: any) => {
 const webhookPosts = () => requests.filter((r) => r.url.includes("oapi.dingtalk.com/robot/send"));
 const sessionReplies = () => requests.filter((r) => r.url.includes("sendBySession"));
 const approvalPosts = () =>
-	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("需要批准"));
+	webhookPosts().filter((r) => String(r.body?.markdown?.text ?? "").includes("需要你批准"));
 const questionPosts = () =>
-	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("需要你的回答"));
+	webhookPosts().filter((r) => String(r.body?.markdown?.text ?? "").includes("需要你的回答"));
 const questionTimeoutPosts = () =>
 	webhookPosts().filter((r) => String(r.body?.markdown?.title ?? "").includes("提问超时"));
 const questionAnsweredLocallyPosts = () =>
@@ -469,6 +469,13 @@ console.log("\n[6] 远程审批：批准（register + 一次性放行）");
 	check("危险命令触发了审批通知", await waitFor(() => approvalPosts().length >= 1));
 	const id = /`([A-Z0-9]{4,})`/.exec(String(approvalPosts().at(-1)?.body?.markdown?.text ?? ""))?.[1] ?? "";
 	check("审批通知里带了编号", Boolean(id), id);
+	const approvalTitle = String(approvalPosts().at(-1)?.body?.markdown?.title ?? "");
+	check("审批标题用操作内容而不是编号", !approvalTitle.includes(id) && approvalTitle.includes("rm -rf"), approvalTitle);
+	check(
+		"审批编号在正文第二行",
+		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").split("\n")[1]?.includes(id) === true,
+		String(approvalPosts().at(-1)?.body?.markdown?.text ?? "").split("\n").slice(0, 2).join(" / "),
+	);
 	// Approvals carry no footer, so the origin has to be an explicit line —
 	// otherwise a request from a *different* session looks like it is yours.
 	check(
@@ -602,6 +609,9 @@ console.log("\n[9.1] 双端提问：TUI 对话框与钉钉同时出现，钉钉�
 		questionPosts().length - postsBefore,
 	);
 	const askText = String(questionPosts().at(-1)?.body?.markdown?.text ?? "");
+	const askTitle = String(questionPosts().at(-1)?.body?.markdown?.title ?? "");
+	check("提问标题用问题原文而不是编号", askTitle.includes("要部署到生产吗") && !askTitle.includes("编号"), askTitle);
+	check("提问编号在正文第二行", askText.split("\n")[1]?.includes("编号") === true, askText.split("\n").slice(0, 2).join(" / "));
 	check("推送里带上了问题原文", askText.includes("要部署到生产吗"));
 	check("推送里列出了编号选项", askText.includes("1. 立即部署 （推荐）") && askText.includes("2. 先等等"), askText);
 	check("选项描述换行显示", askText.includes("明天再说"), askText);

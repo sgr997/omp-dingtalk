@@ -177,7 +177,6 @@ export function fmtApprovalRequest(info: {
 }): Message {
 	const lines = [
 		`## 🔐 需要你批准`,
-		``,
 		`- **编号**: \`${info.id}\``,
 		`- **工具**: \`${info.toolName}\``,
 		`- **触发原因**: ${truncate(info.reason, 160)}`,
@@ -192,7 +191,10 @@ export function fmtApprovalRequest(info: {
 		`回复 **同意** 或 **拒绝**（也可用 \`/approve ${info.id}\` 或 \`/deny ${info.id}\`）。`,
 		`> ${Math.round(info.timeoutMs / 1000)}s 内没有回复则按配置的默认策略处理。`,
 	);
-	return { title: `需要批准：${info.toolName}`, text: lines.join("\n") };
+	// Card title carries the operation itself; the short id lives on line 2 so the
+	// notification is readable at a glance in the chat list.
+	const summary = truncate(info.detail.replace(/\s+/g, " ").trim(), 48);
+	return { title: `${info.toolName} · ${summary}`, text: lines.join("\n") };
 }
 
 export function fmtApprovalResolved(info: { id: string; approved: boolean; by: string; note?: string }): Message {
@@ -301,7 +303,6 @@ export function fmtQuestionRequest(pack: QuestionPack): Message {
 		: `直接回复选项号即可，如 \`2\`；多选用 \`2,4\`；回选项文字或任意文字也可以。`;
 	const lines = [
 		`## ❓ 需要你的回答`,
-		``,
 		`- **编号**: \`${pack.id}\``,
 		...(sessionTag ? [originLine()] : []),
 		``,
@@ -310,7 +311,11 @@ export function fmtQuestionRequest(pack: QuestionPack): Message {
 		``,
 		`> ${Math.round(pack.timeoutMs / 1000)}s 内没有回复会告知 omp 自行决定。`,
 	];
-	return { title: `需要你的回答 ${pack.id}`, text: lines.join("\n") };
+	// Title = the question itself (first one when several), so the chat list shows
+	// what is being asked instead of a short id.
+	const first = pack.questions[0]?.question ?? "";
+	const more = multiple ? `（共 ${pack.questions.length} 问）` : "";
+	return { title: `${truncate(first.replace(/\s+/g, " ").trim(), 40)}${more}`, text: lines.join("\n") };
 }
 
 export function fmtQuestionAnswerEcho(info: {
