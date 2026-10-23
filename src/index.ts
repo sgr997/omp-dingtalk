@@ -669,9 +669,7 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 				if (action === "takeover" || action === "接管") {
 					const robotName = (rest[0] ?? "").trim() || "default";
 					const result = b.takeOver(robotName, { sessionId: sessionIdOf(ctx), ctx });
-					const hint = b.cfg.notify.onlyWhenTakenOver
-						? " 通知从现在起才会发到钉钉（notify.onlyWhenTakenOver），建议先 `/dingtalk test` 确认能收到。"
-						: "";
+					const hint = " 通知从现在起才会发到钉钉，建议先 `/dingtalk test` 确认能收到。";
 					const stolen = result.preempted
 						? ` 已从另一个会话手里抢占（\`${truncatePath(result.preempted.cwd || "?", 80)}\` · PID ${result.preempted.pid}）。`
 						: "";
@@ -728,9 +726,9 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 						);
 						return;
 					}
-					// 静默期（notify.onlyWhenTakenOver）是允许手动测试的——否则没法确认
-					// 出站通道通不通。只有钉钉已经被别的会话接管时才拒绝：那时这条消息
-					// 会被算到别人头上。
+					// 手动测试不需要接管：这是用户显式要求的发送，用于确认出站通道
+					// 通不通。只有钉钉已经被别的会话接管时才拒绝：那时这条消息会被
+					// 算到别人头上。
 					if (b.channelHeldByOther) {
 						ctx.ui?.notify?.(
 							"测试消息未发送：钉钉通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 /dingtalk takeover。",

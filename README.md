@@ -225,18 +225,17 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
     "autoTakeover": false,
     "allowUserId": ""
   },
-  "notify": { "onlyWhenTakenOver": true }
+  "notify": { "sessionStop": true, "errors": true }
 }
 ```
 
 - `scope: "direct"` —— 群里 @ 机器人也**完全不响应**，只有单聊能指挥它。
 - `autoTakeover: false` —— 会话启动时**不会**自动连上入站通道，必须在 omp 里敲 `/dingtalk takeover` 才接通。已经接管的会话，新会话启动**不会**把它松开（接管是显式状态，只由 `/dingtalk takeover` 抢占或 `/dingtalk release` 主动解除）。
-- **接管会话是钉钉的唯一出口**：你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发——`onlyWhenTakenOver` 即使是 `false` 也一样。别的会话（旁观者）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，未显式 release 的会话按 `onlyWhenTakenOver` 正常发。此独占规则通过本地锁实现，不跨电脑。
-- **`/dingtalk release` 停止本会话的入站控制和自动推送**：即使 `onlyWhenTakenOver: false`，之后新产生的回复完成、错误、退出通知及模型通知工具也不会发送。重复 release 保持停止状态；`quiet off` 不会撤销它。该状态随本会话保存，恢复同一会话时不会被 `autoTakeover` 自动解除，直到再次成功执行 `/dingtalk takeover`。手动 `/dingtalk test` 仍可测试发送，但不会恢复自动推送。不同电脑上的其他会话不受影响。 主动释放已接管的会话时，会向刚释放的机器人发送一条「钉钉已解除接管」确认；重复 release 不重复发送。确认走原发送队列，释放立即生效；发送失败会在终端提示，不会恢复接管或自动推送。
-- `onlyWhenTakenOver: true` —— **接管前一条通知都不发**，接管后才开始发，`/dingtalk release` 之后又停。适合「坐在电脑前不想被打扰，出门前 takeover 一下」。
-  - 它是**全有全无**的：空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
-  - 要求**能**接管（`stream` 凭据齐全）。如果配了它却又无法接管，配置加载时会明确告警「一条通知也不会有」——这个组合是永久静默，最容易误判成「没问题」。
-  - `/dingtalk test` 和 `bun run doctor` 不受影响，仍是验证出站通道的手段。
+- **通知跟着接管走**：只有接管中的会话会推钉钉。你在哪个会话 `/dingtalk takeover`，通知、审批、提问澄清就只从那个会话发；别的会话（旁观者、子代理、headless）完全静默：不推轮次 / 空闲 / 退出通知，不推提问卡，不拦截审批，`dingtalk_notify` 与 `/dingtalk test` 也都不发；接管被别的会话抢走时，被抢的一方同样闭嘴（只在终端日志里记一笔）。没人接管时，谁都不推。此独占规则通过本地锁实现，不跨电脑。
+- **`/dingtalk release` 停止本会话的入站控制和自动推送**：之后新产生的回复完成、错误、退出通知及模型通知工具也不会发送。重复 release 保持停止状态；`quiet off` 不会撤销它。该状态随本会话保存，恢复同一会话时不会被 `autoTakeover` 自动解除，直到再次成功执行 `/dingtalk takeover`。手动 `/dingtalk test` 仍可测试发送，但不会恢复自动推送。不同电脑上的其他会话不受影响。 主动释放已接管的会话时，会向刚释放的机器人发送一条「钉钉已解除接管」确认；重复 release 不重复发送。确认走原发送队列，释放立即生效；发送失败会在终端提示，不会恢复接管或自动推送。
+- 未接管时是**全有全无**的静默：空闲、审批、错误告警、退出通知**全部**被压住。⚠️ 这意味着未接管期间「模型凭据被禁用」这类告警你也收不到。
+- 要求**能**接管（`stream` 凭据齐全）。如果无法接管，配置加载时会明确告警「一条通知也不会有」——这个组合是永久静默，最容易误判成「没问题」。
+- `/dingtalk test` 和 `bun run doctor` 不受影响，仍是验证出站通道的手段。
 - 注意 `autoTakeover: false` 时 `stream.enabled` 仍应为 `true`，否则 `/dingtalk takeover` 会拒绝接管并告诉你原因。
 
 ### 先锁定权限（强烈建议）
@@ -356,14 +355,13 @@ omp --approval-mode=yolo
 {
   "approval": { "mode": "off" },
   "notify": {
-    "onlyWhenTakenOver": true,
     "sessionStop": true,
     "turnEnd": { "enabled": true, "minDurationMs": 120000 }
   }
 }
 ```
 
-`onlyWhenTakenOver: true` 让**接管前完全静默**：平时零打扰，出门前在 omp 里敲一句 `/dingtalk takeover`，之后才开始收通知；回来 `/dingtalk release` 又恢复安静。
+通知**只在接管期间发**：平时零打扰，出门前在 omp 里敲一句 `/dingtalk takeover`，之后才开始收通知；回来 `/dingtalk release` 又恢复安静。
 
 `notify.maxTextChars`（默认 1800）现在是**每条消息**的预算，不是整条回复的上限：模型回复很长时，插件会按段落/行边界拆成多条消息依次发送（标题带 `(1/3)` 这种角标），全文送达而不会在末尾出现 `…`。钉钉对单条消息有长度上限，超了会整条拒收（不是只截断），所以「拆多条」是唯一能完整展示长回复的办法。代码围栏跨消息时会自动闭合再重开，两半都还是代码块。
 
@@ -533,7 +531,7 @@ bun run typecheck   # tsc 严格模式全量检查（0 错误）
 bun run lint        # oxlint（0 警告）
 ```
 
-- `test/smoke.ts` — 全部使用 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、接管前静默的开关与解除、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡（`onlyWhenTakenOver = false` 也要挡）、A 释放后 B 恢复推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
+- `test/smoke.ts` — 全部使用 mock（假 `fetch` + 假 `WebSocket`），不需要真凭据。覆盖限流发送、加签、帧处理与 ACK、去重、鉴权、指令路由、审批的批准/拒绝/超时三条路径（含一次性放行与同参数去重）、静音、`webhook`/`direct`/`both` 三条出站路径、白名单里那个人即推送收件人、`scope` 双向过滤、通知跟随接管的开与关、通知里的会话标识、回复的 markdown 渲染（含表格连续性）、长回复按 `maxTextChars` 拆成多条消息**全量送达**（含围栏跨消息成对闭合、末尾哨兵零丢失）、表情反馈（👀 确认与 ✅/❌ 结束），以及「没凭据时必须安全降级」。多会话部分覆盖：后抢的会话覆盖先抢的、被抢者在一个心跳周期内自动关闭 Stream 且**不推任何卡片**（钉钉只有一个出口）、被抢者 `release` 不误删新持有者的锁、死进程 / 心跳超时的锁可回收、不同 `clientId` 互不干扰、抢占后消息只到达新持有者、新会话启动不释放已有接管、A 接管后 B 的轮次/空闲通知与 `dingtalk_notify` 一律被挡、A 释放后 B 仍需自己 takeover 才会推送、`autoTakeover = true` 下第二个顶层会话「后来者覆盖」接管通道（旧会话的归属随后失效）、子代理（无 UI 的 headless 会话）的 `session_start`/`session_shutdown`/轮次一律忽略——既不推「omp 已退出」也不拆主会话的桥，且不误伤同一进程里的第二个顶层会话（桥改随新会话，接管后事件照常推送）；子代理在**自己的 cwd** 里重新绑定插件（宿主按会话重建工厂，每个副本一份 bridge）时，整份副本必须完全静默：不推送、不建连接，只有主会话照常推送。`/dingtalk status` 展示桥绑定会话 id，并在被问的会话与桥归属不一致时给出显式接管提示；被归属过滤丢弃的事件只在 debug 记录（子代理是常规流量），但 status 会展示累计丢弃计数。多机器人部分覆盖：`robots` 映射按名字解析、`takeover <名字>` 会把确认卡和后续通知发到**那个机器人的 webhook**、不存在的机器人被拒绝并列出可用项、`status` 展示当前机器人、`release` 回到默认机器人、直接切换另一个机器人（不先 release）也正常、切换过程中默认机器人不收到确认卡。
 - `test/state-regressions.test.ts`、`test/lifecycle-boundaries.test.ts`、`test/lock-concurrency.test.ts` — 覆盖 release 后旧入站/排队发送失效、旁观 status、跨会话审批、取消 ask 及排队提问、机器人凭据/scope 校验、token 身份及晚返回缓存、配置重载禁用控制，以及真实双进程中的锁心跳交错。
 - `test/verify-load.ts` — 直接调用 **OMP 自己的 `discoverAndLoadExtensions()`**，确认插件真能被发现、无加载错误、handler/工具/命令都挂上了。（这一层能抓到软链接坏掉这类只存在于加载器里的问题。）
 
@@ -544,8 +542,8 @@ bun run lint        # oxlint（0 警告）
 | 现象 | 排查 |
 | --- | --- |
 | 收不到任何通知 | 先跑 `bun run doctor`（会自动翻译错误码）；或在 omp 里跑 `/dingtalk test` |
-| release 后仍每轮收到完成通知 | 旧代码在 `notify.onlyWhenTakenOver: false` 时只断开入站，不阻止随后新产生的通知。更新并重启 OMP 会话后，再执行 release；status 首行应显示“已释放”，实际入站连接“已关闭”，自动推送“已停止”。本机 release 不改变其他电脑的会话 |
-| 一条通知都没有，但 doctor 全绿 | 多半是 `notify.onlyWhenTakenOver: true` 而**还没执行** `/dingtalk takeover`。这是设计行为，不是故障 —— 接管后才开始发。配置加载时的告警会直接告诉你这个组合是否会导致「永远静默」 |
+| release 后仍每轮收到完成通知 | 通知只在接管期间发。更新并重启 OMP 会话后，再执行 release；status 首行应显示“已释放”，实际入站连接“已关闭”，自动推送“已停止”。本机 release 不改变其他电脑的会话 |
+| 一条通知都没有，但 doctor 全绿 | 多半是**还没执行** `/dingtalk takeover`。通知只在接管期间发，这是设计行为，不是故障。无法接管时配置加载会告警「一条通知也不会有」 |
 | 接管成功、锁和 Stream 都正常，却一条都不推 | 同一个 omp 进程里先跑过别的会话（切会话 / 新建 / 恢复），桥的归属还停在那一个 session 上，于是接管会话自己的事件被当成「外来会话」过滤掉了。已在插件侧修好：顶层会话切换时桥自动改随新会话，接管成功时也会重新绑定；`autoTakeover = true` 时新会话「后来者覆盖」直接接管；子代理（无 UI 的 headless runner）依旧完全静默。**例外**：无 UI 的顶层会话（`omp -p` / ACP / SDK 这类 `rpc`/`json`/`print` 模式）与子代理在宿主暴露的字段上无法区分，不会被自动改绑——在这类会话里执行 `/dingtalk takeover` 即可接手。用 `/dingtalk status` 看「桥绑定会话」是否与当前会话一致，不一致时会直接给出提示。旧版遇到这个现象：退出重开该 omp 会话，或在本会话再执行一次 `/dingtalk takeover` |
 | 启动时不推「omp 已启动」 | 这是设计行为：会话启动不再推送任何消息（`notify.sessionStart` 已移除）。启动后真正在 omp 里执行 `/dingtalk takeover` 时，钉钉会收到一条「🎧 钉钉已接管本会话」确认消息 |
 | 长回复末尾是 `…`，没显示全 | 旧版把整张卡截到 `notify.maxTextChars`（默认 1800），超长回复就丢了尾巴。新版自动把超长内容按段落/行边界拆成多条消息（标题带 `(1/N)` 角标）依次发送，全文送达。想单条更长可调大 `notify.maxTextChars`，但别超钉钉单条上限，否则整条会被拒收 |

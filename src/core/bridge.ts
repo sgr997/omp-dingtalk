@@ -172,7 +172,7 @@ export class Bridge<P extends PlatformConfig> {
 		return () => generation === this.#generation && this.cfg.enabled &&
 			(!this.notificationsReleased || options.bypassTakeover === true) &&
 			(!this.takenOver || this.lock?.isOwner() === true) && !this.channelHeldByOther &&
-			(options.bypassTakeover === true || !this.cfg.notify.onlyWhenTakenOver || this.takenOver);
+			(options.bypassTakeover === true || this.takenOver);
 	}
 
 	#invalidate(reason: string, preserveReleaseReceipt = false): void {
@@ -259,11 +259,12 @@ export class Bridge<P extends PlatformConfig> {
 	notify(message: Message, options: NotifyOptions = {}): void {
 		if (!this.cfg.enabled) return;
 		if (this.notificationsReleased) return;
-		// "Silent until takeover" outranks `bypassQuiet`: it is an explicit
-		// choice to have the channel say nothing until control was handed over, and
-		// approvals cannot happen in that state anyway (the gate stands down).
-		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver && !options.bypassTakeover) {
-			this.log.debug("配置为接管前静默，跳过通知", { title: message.title });
+		// Notifications track takeover: no control, no push. Approvals cannot
+		// happen in that state anyway (the gate stands down), and a bystander
+		// session pushing into the same conversation is noise the user cannot
+		// attribute.
+		if (!this.takenOver && !options.bypassTakeover) {
+			this.log.debug("本会话未接管通道，跳过通知", { title: message.title });
 			return;
 		}
 		// A takeover held by another live session makes this one a bystander:
@@ -302,7 +303,7 @@ export class Bridge<P extends PlatformConfig> {
 	get canPush(): boolean {
 		if (!this.cfg.enabled) return false;
 		if (this.notificationsReleased) return false;
-		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) return false;
+		if (!this.takenOver) return false;
 		if (this.channelHeldByOther) return false;
 		if (this.takenOver && !this.lock?.isOwner()) return false;
 		return this.sender.configured;
@@ -312,11 +313,11 @@ export class Bridge<P extends PlatformConfig> {
 	get pushBlockedReason(): string | undefined {
 		if (!this.cfg.enabled) return "插件被 `enabled: false` 关闭了。";
 		if (this.notificationsReleased) return "本会话已执行 `/dingtalk release`，自动推送已停止；重新 `/dingtalk takeover` 后恢复。";
-		if (this.cfg.notify.onlyWhenTakenOver && !this.takenOver) {
-			return "配置为「接管前静默」（notify.onlyWhenTakenOver），需要先在 omp 里执行 `/dingtalk takeover`。";
-		}
 		if (this.channelHeldByOther) {
 			return "通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 `/dingtalk takeover`。";
+		}
+		if (!this.takenOver) {
+			return "本会话未接管钉钉通道，需要先在 omp 里执行 `/dingtalk takeover`。";
 		}
 		if (this.takenOver && !this.lock?.isOwner()) return "接管锁已失效，请重新执行 `/dingtalk takeover`。";
 		if (!this.sender.configured) {

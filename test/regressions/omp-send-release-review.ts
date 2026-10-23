@@ -1,6 +1,6 @@
 import {mkdtempSync,writeFileSync} from 'node:fs';import {join} from 'node:path';import {tmpdir} from 'node:os';
 const scratch=mkdtempSync(join(tmpdir(),'omp-send-release-review-'));const config=join(scratch,'config.json');
-writeFileSync(config,JSON.stringify({webhook:{url:'https://mock.invalid/send'},stream:{enabled:true,clientId:'review-client',clientSecret:'review-secret'},control:{enabled:true,scope:'direct',allowUserId:'review-user',autoTakeover:false,replyToSession:false},notify:{onlyWhenTakenOver:true}}));
+writeFileSync(config,JSON.stringify({webhook:{url:'https://mock.invalid/send'},stream:{enabled:true,clientId:'review-client',clientSecret:'review-secret'},control:{enabled:true,scope:'direct',allowUserId:'review-user',autoTakeover:false,replyToSession:false},notify: {}}));
 process.env.OMP_DINGTALK_CONFIG=config;process.env.OMP_DINGTALK_LOCK_DIR=join(scratch,'locks');process.env.OMP_DINGTALK_MIN_GAP_MS='5';
 let unblock!:()=>void; const gate=new Promise<void>(r=>unblock=r);let first=true;const calls:any[]=[];
 const resp=(body:any)=>({ok:true,status:200,text:async()=>JSON.stringify(body),json:async()=>body});

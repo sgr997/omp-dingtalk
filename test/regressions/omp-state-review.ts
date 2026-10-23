@@ -16,7 +16,7 @@ const cfg = {
   outbound: { mode: 'direct' },
   stream: { enabled: true, clientId: 'app-A', clientSecret: 'fake-A', robotCode: 'robot-A' },
   control: { enabled: true, autoTakeover: false, allowUserId: 'operator', scope: 'direct' },
-  notify: { onlyWhenTakenOver: true, sessionShutdown: false },
+  notify: { sessionShutdown: false },
   robots: { beta: { stream: { enabled: true, clientId: 'app-B', clientSecret: 'fake-B', robotCode: 'robot-B' } } },
 };
 writeFileSync(process.env.OMP_DINGTALK_CONFIG!, JSON.stringify(cfg));

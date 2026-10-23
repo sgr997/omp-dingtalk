@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const scratch=mkdtempSync(join(tmpdir(),'omp-release-review-'));
 const config=join(scratch,'config.json');
-writeFileSync(config,JSON.stringify({webhook:{url:'https://mock.invalid/send'},stream:{enabled:true,clientId:'review-client',clientSecret:'review-secret'},control:{enabled:true,scope:'direct',allowUserId:'review-user',autoTakeover:false},notify:{onlyWhenTakenOver:true}}));
+writeFileSync(config,JSON.stringify({webhook:{url:'https://mock.invalid/send'},stream:{enabled:true,clientId:'review-client',clientSecret:'review-secret'},control:{enabled:true,scope:'direct',allowUserId:'review-user',autoTakeover:false},notify: {}}));
 process.env.OMP_DINGTALK_CONFIG=config;
 process.env.OMP_DINGTALK_LOCK_DIR=join(scratch,'locks');
 const calls:any[]=[]; let heldReply: (()=>void)|undefined;

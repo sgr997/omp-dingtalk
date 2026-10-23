@@ -1150,9 +1150,9 @@ console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
 		directConfig,
 		JSON.stringify({
 			webhook: { url: "" },
-			stream: { enabled: false, clientId: "direct-client", clientSecret: "direct-secret", robotCode: "ding-direct" },
+			stream: { enabled: true, clientId: "direct-client", clientSecret: "direct-secret", robotCode: "ding-direct" },
 			outbound: { mode: "direct" },
-			control: { allowUserId: "user-1" },
+			control: { allowUserId: "user-1", autoTakeover: true },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1173,6 +1173,10 @@ console.log("\n[19] 出站走单聊推送（outbound.mode = direct）");
 	// Let the previous section's queued notifications finish draining, so the
 	// "no group posts" baseline below is not polluted by them.
 	await tick(200);
+	// Notifications only go out while this session holds the channel: take it
+	// over first, then take the baseline after the takeover card has drained.
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, localCtx);
+	await tick(150);
 	const beforeGroup = groupPosts().length;
 	const beforeOto = otoPosts().length;
 	// Startup is silent by design, so trigger a real notification via the
@@ -1209,9 +1213,9 @@ console.log("\n[20] outbound.mode = both 时两条通道都发");
 		bothConfig,
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=BOTHTOKEN", secret: "" },
-			stream: { enabled: false, clientId: "both-client", clientSecret: "both-secret", robotCode: "ding-both" },
+			stream: { enabled: true, clientId: "both-client", clientSecret: "both-secret", robotCode: "ding-both" },
 			outbound: { mode: "both" },
-			control: { allowUserId: "user-2" },
+			control: { allowUserId: "user-2", autoTakeover: true },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1222,6 +1226,8 @@ console.log("\n[20] outbound.mode = both 时两条通道都发");
 	const localPi: any = { ...pi, on: (e: string, h: Handler) => localHandlers.set(e, [...(localHandlers.get(e) ?? []), h]) };
 	module.default(localPi);
 
+	await localHandlers.get("session_start")![0]({ type: "session_start" }, ctx);
+	await tick(150);
 	const beforeGroup = groupPosts().length;
 	const beforeOto = otoPosts().length;
 	// Startup is silent by design, so trigger a real notification via the
@@ -1359,7 +1365,7 @@ console.log("\n[22] scope = direct 时群聊消息一律忽略");
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
-console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
+console.log("\n[23] 未接管时完全静默（通知跟随接管）");
 {
 	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-silent-"));
 	const silentConfig = join(dir, "dingtalk.json");
@@ -1368,7 +1374,7 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=SILENTTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "silent-client", clientSecret: "silent-secret", robotCode: "ding-silent" },
-			notify: { onlyWhenTakenOver: true },
+			notify: {},
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct", allowUserId: "staff-smoke" },
 		}),
 	);
@@ -1453,7 +1459,7 @@ console.log("\n[23] notify.onlyWhenTakenOver：接管前完全静默");
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
-console.log("\n[24] onlyWhenTakenOver 却永远无法接管 → 必须告警");
+console.log("\n[24] 无法接管 → 通知永远发不出去，必须告警");
 {
 	// The worst failure mode is silent-forever: it looks like nothing is wrong.
 	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-silent-dead-"));
@@ -1463,7 +1469,6 @@ console.log("\n[24] onlyWhenTakenOver 却永远无法接管 → 必须告警");
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEADTOKEN" },
 			stream: { enabled: false },
-			notify: { onlyWhenTakenOver: true },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1474,7 +1479,7 @@ console.log("\n[24] onlyWhenTakenOver 却永远无法接管 → 必须告警");
 
 	check(
 		"配置会明确告警「一条通知也不会有」",
-		loaded.warnings.some((w: string) => w.includes("onlyWhenTakenOver") && w.includes("一条通知也不会有")),
+		loaded.warnings.some((w: string) => w.includes("通知只在接管后发送") && w.includes("一条通知也不会有")),
 		loaded.warnings,
 	);
 }
@@ -1547,7 +1552,7 @@ console.log("\n[26] 多会话抢占：新会话 takeover 覆盖旧会话");
 			stream: { enabled: true, clientId: "preempt-client", clientSecret: "preempt-secret", robotCode: "ding-preempt" },
 			// Deliberately silent-until-takeover: the preemption warning has to be
 			// the one thing that still gets through.
-			notify: { onlyWhenTakenOver: true, turnEnd: { enabled: true, minDurationMs: 0 } },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 } },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 		}),
 	);
@@ -1782,9 +1787,9 @@ console.log("\n[30] 子代理在独立 cwd 里绑定自己的副本时保持静�
 console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知");
 {
 	// The real-world setup: window A takes over, window B is an ordinary
-	// session. With notify.onlyWhenTakenOver = false, B used to push its own
-	// "omp 空闲" card into the same DingTalk account A controls. A takeover
-	// must claim the outbound side too, or the user cannot tell which window
+	// session. Notifications follow takeover, so B stays silent for as long as
+	// it does not hold the channel — otherwise the user gets two interleaved
+	// streams of cards from one DingTalk account and cannot tell which window
 	// is talking to them.
 	const base = mkdtempSync(join(tmpdir(), "omp-dingtalk-bystander-"));
 	const cfgPath = join(base, "dingtalk.json");
@@ -1793,9 +1798,7 @@ console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=BYSTANDERTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "bystander-client", clientSecret: "bystander-secret", robotCode: "ding-bystander" },
-			// Deliberately false: the point is that the takeover itself silences
-			// the other session, not this switch.
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 		}),
 	);
@@ -1831,10 +1834,12 @@ console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知
 	};
 	const turnEvent = { type: "turn_end", turnIndex: 0, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } };
 
-	// Nobody owns the channel yet: B is an ordinary notifier.
+	// Nobody owns the channel yet, and B has not taken it over: silent.
 	const beforeTakeover = groupPosts().length;
 	await beta.h.get("turn_end")![0](turnEvent, beta.ctx);
-	check("没人接管时 B 照常推送（旁观判定不误伤）", await waitFor(() => groupPosts().length > beforeTakeover), groupPosts().length - beforeTakeover);
+	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
+	await tick(200);
+	check("没人接管时 B 也不推送", groupPosts().length === beforeTakeover, groupPosts().length - beforeTakeover);
 
 	await alpha.cmds.get("dingtalk").handler("takeover", alpha.ctx);
 	check("A 接管成功", String(alpha.notes.at(-1) ?? "").includes("钉钉已接管本会话"), alpha.notes.at(-1));
@@ -1863,9 +1868,17 @@ console.log("\n[31] 别人接管时本会话是旁观者：不推送任何通知
 	check("接管方 A 照常推送", await waitFor(() => groupPosts().length > ownerBaseline), groupPosts().length - ownerBaseline);
 
 	await alpha.cmds.get("dingtalk").handler("release", alpha.ctx);
+	// The release confirmation is queued behind the outbound queue; let it land
+	// before taking the baseline, or it looks like B pushed something.
+	await tick(250);
 	const afterRelease = groupPosts().length;
 	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
-	check("A 释放后 B 恢复推送（通道没人占）", await waitFor(() => groupPosts().length > afterRelease), groupPosts().length - afterRelease);
+	await tick(200);
+	check("A 释放后 B 仍不推送（B 没接管）", groupPosts().length === afterRelease, groupPosts().length - afterRelease);
+	await beta.cmds.get("dingtalk").handler("takeover", beta.ctx);
+	const afterBetaTakeover = groupPosts().length;
+	await beta.h.get("session_stop")![0](stopEvent, beta.ctx);
+	check("B 自己接管后才开始推送", await waitFor(() => groupPosts().length > afterBetaTakeover), groupPosts().length - afterBetaTakeover);
 
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
@@ -1885,8 +1898,8 @@ console.log("\n[32] 同进程第二个顶层会话：接管后事件不再被当
 		cfgPath,
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=MULTITOKEN", secret: "" },
-			stream: { enabled: false },
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			stream: { enabled: true, clientId: "multi-client", clientSecret: "multi-secret", robotCode: "ding-multi" },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 		}),
 	);
@@ -1949,7 +1962,7 @@ console.log("\n[33] autoTakeover=true：第二个顶层会话后来者覆盖，�
 			// Takeover opens the inbound stream; with it disabled, takeOver()
 			// fails and the "later wins" path below is never exercised.
 			stream: { enabled: true, clientId: "laterwins-client", clientSecret: "laterwins-secret", robotCode: "ding-laterwins" },
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct" },
 		}),
 	);
@@ -2015,7 +2028,7 @@ console.log("\n[34] /dingtalk status 在桥绑定会话与当前会话不符时�
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=STATUSMISMATCH", secret: "" },
 			stream: { enabled: false },
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 		}),
 	);
@@ -2071,9 +2084,9 @@ console.log("\n[35] 超长回复按多条消息全量推送（不再截断成 �
 		cfgPath,
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=LONGREPLYTOKEN", secret: "" },
-			stream: { enabled: false },
-			notify: { onlyWhenTakenOver: false, maxTextChars: 400, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
-			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
+			stream: { enabled: true, clientId: "long-client", clientSecret: "long-secret", robotCode: "ding-long" },
+			notify: { maxTextChars: 400, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { ...MAIN_CONTROL, autoTakeover: true, scope: "direct" },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -2148,7 +2161,7 @@ console.log("\n[37] 多机器人：robots 映射解析 + takeover <name> 切换�
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEFTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "def-client", clientSecret: "def-secret", robotCode: "dingdef" },
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			approval: { mode: "remote", timeoutMs: 1_500, onTimeout: "deny" },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 			robots: {
@@ -2246,7 +2259,7 @@ console.log("\n[37] 多机器人：robots 映射解析 + takeover <name> 切换�
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEFTOKEN", secret: "" },
 			stream: { enabled: true, clientId: "def-client", clientSecret: "def-secret", robotCode: "dingdef" },
-			notify: { onlyWhenTakenOver: false, turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
 			approval: { mode: "remote", timeoutMs: 1_500, onTimeout: "deny" },
 			control: { ...MAIN_CONTROL, autoTakeover: false, scope: "direct" },
 			robots: {

@@ -12,7 +12,7 @@ const config = {
 	stream: { enabled: true, clientId: "shared-app", clientSecret: "fake", robotCode: "robot" },
 	control: { enabled: true, allowUserId: "staff", autoTakeover: false },
 	// This is the default that previously let every new stop notification through.
-	notify: { onlyWhenTakenOver: false, sessionStop: true, errors: true },
+	notify: { sessionStop: true, errors: true },
 };
 writeFileSync(process.env.OMP_DINGTALK_CONFIG, JSON.stringify(config));
 const messages: Array<{ title: string; text: string }> = [];
@@ -91,7 +91,7 @@ await a.action("release");
 const releaseReceipts = () => messages.filter((message) => message.title.includes("解除接管") && message.text.includes(a.ctx.cwd));
 assert.equal(releaseReceipts().length, 1, "explicit release should send one DingTalk confirmation");
 for (let i = 0; i < 3; i++) await a.event("session_stop", stop(`after-release-A-${i}`));
-assert.equal(count("after-release-A-"), 0, "release must block NEW completion notifications even when onlyWhenTakenOver=false");
+assert.equal(count("after-release-A-"), 0, "release must block NEW completion notifications");
 await b.event("session_stop", stop("still-active-B"));
 assert.equal(count("still-active-B"), 1, "release on A must not affect B");
 
@@ -135,23 +135,26 @@ assert.equal(count("resumed-takeover-A"), 1, "explicit successful takeover resum
 await resumed.action("release");
 await b.action("release");
 
-// Pure notification sessions must also be able to stop without ever taking over.
+// Notifications now track takeover: a session that never took over pushes nothing.
 config.control.autoTakeover = false;
 writeFileSync(process.env.OMP_DINGTALK_CONFIG!, JSON.stringify(config));
 const fresh = await boot("notification-only");
 await fresh.event("session_stop", stop("initial-notify"));
-assert.equal(count("initial-notify"), 1, "new notification-only sessions retain the existing default behavior");
+assert.equal(count("initial-notify"), 0, "a session that never took over pushes nothing");
+await fresh.action("takeover");
+await fresh.event("session_stop", stop("taken-over-notify"));
+assert.equal(count("taken-over-notify"), 1, "takeover turns automatic pushes on");
 await fresh.action("release");
 await fresh.action("test"); // A deliberate test send is allowed, but does not resume automatic pushes.
 await fresh.event("session_stop", stop("released-notify"));
-assert.equal(count("released-notify"), 0, "release also stops a session that had never taken over");
+assert.equal(count("released-notify"), 0, "release stops a session that had taken over");
 
 // A different session has its own state, rather than inheriting the old release.
 fresh.ctx.sessionManager.getSessionId = () => "new-session";
 fresh.ctx.sessionManager.getBranch = () => [];
 await fresh.event("session_start");
 await fresh.event("session_stop", stop("new-session-notify"));
-assert.equal(count("new-session-notify"), 1, "an unrelated new session keeps its notification defaults");
+assert.equal(count("new-session-notify"), 0, "an unrelated new session starts silent until takeover");
 await fresh.action("release");
 
 console.log("explicit release: subsequent replies, errors, model pushes and resumed sessions stay silent; takeover resumes; other machine stays independent");

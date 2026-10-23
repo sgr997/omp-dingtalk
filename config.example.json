@@ -1,8 +1,6 @@
 {
   "$comment": "把本文件复制到 ~/.omp/dingtalk.json（或 <项目>/.omp/dingtalk.json）后按需修改。所有字段都有默认值，只需填你要用的部分。",
-
   "enabled": true,
-
   "webhook": {
     "$comment": "群通知通道（outbound.mode 为 webhook / both 时使用）。钉钉群 → 群设置 → 智能群助手 → 添加机器人 → 自定义机器人。三种安全设置选一种即可。",
     "url": "",
@@ -12,7 +10,6 @@
     "keyword": "",
     "$comment_keyword": "例如填「omp」，插件会自动把关键词加进每条消息，避免被钉钉拦截。"
   },
-
   "stream": {
     "$comment": "企业应用凭据同时供 direct 出站和入站 Stream 使用；enabled 只控制是否启用入站连接。纯通知保持 false；远程控制才需要在钉钉为机器人启用 Stream 并发布应用。",
     "enabled": false,
@@ -21,14 +18,12 @@
     "robotCode": "",
     "$comment_robotCode": "机器人详情页的 robotCode（ding 开头）。出站选 direct / both 时必填；单聊推送使用它，即使 stream.enabled 为 false。"
   },
-
   "outbound": {
     "$comment": "通知走哪条路。webhook = 群里那个自定义机器人（只能发群，没法私聊）；direct = 企业内部应用机器人 1:1 私聊推送；both = 两边都发。",
     "mode": "webhook",
     "$comment_mode": "想「只收单聊、不打扰群」就改成 direct。",
     "$comment_recipient": "单聊推送对象就是 control.allowUserId（白名单里那一个人），没有单独的收件人配置。"
   },
-
   "notify": {
     "sessionStop": true,
     "$comment_sessionStop": "本轮跑完、omp 空闲时通知你，这是最主要的「任务完成」提醒。",
@@ -44,16 +39,17 @@
     "toolUse": {
       "enabled": false,
       "$comment": "工具执行失败时通知。",
-      "tools": ["bash", "write", "edit"]
+      "tools": [
+        "bash",
+        "write",
+        "edit"
+      ]
     },
     "atMobiles": [],
     "atUserIds": [],
     "atAll": false,
-    "maxTextChars": 1800,
-    "onlyWhenTakenOver": false,
-    "$comment_onlyWhenTakenOver": "true = 接管前完全静默：没执行 /dingtalk takeover 之前一条通知都不发（含错误告警和退出通知），接管后才开始发。false 允许首次未接管时发送通知。无论此值如何，显式 /dingtalk release 都停止本会话自动推送，直到再次成功 takeover。注意 true 要求能接管（stream 凭据齐全），否则会永远收不到通知。"
+    "maxTextChars": 1800
   },
-
   "approval": {
     "$comment": "远程审批闸门。off = 只通知不拦截；remote = 命中规则的敏感操作会挂起，等你在钉钉里回「同意/拒绝」。",
     "mode": "off",
@@ -62,14 +58,12 @@
     "$comment_rules": "留空数组则使用内置的危险操作规则（rm -rf / sudo / git push / 敏感文件写入等）。",
     "rules": []
   },
-
   "question": {
     "$comment": "启用双端提问：接管期间且有可用出站通道时，终端和钉钉同时显示问题，任一端先答都算；未接管或出站不可用时只显示本地对话框。",
     "enabled": true,
     "timeoutMs": 600000,
     "$comment_timeoutMs": "多久没回复就告知 omp 自行决定（毫秒，默认 600000 = 10 分钟）。"
   },
-
   "control": {
     "enabled": true,
     "scope": "direct",
@@ -85,7 +79,6 @@
     "$comment_freeTextDelivery": "steer = 打断当前轮次立刻执行；followUp = 等当前轮次跑完再执行。",
     "replyToSession": true
   },
-
   "robots": {
     "$comment": "多机器人模式（可选）。顶层字段就是默认机器人（default），上面的 webhook / stream / control 都属于它。命名机器人继承全局设置（notify / approval / question / quiet），只覆盖自己的 webhook / stream / outbound / control。在 omp 里用 /dingtalk takeover <名字> 选择机器人；接管锁按 stream.clientId 隔离，只有不同 clientId 的机器人才能被不同会话同时接管。",
     "home": {
@@ -100,10 +93,13 @@
         "clientSecret": "",
         "robotCode": ""
       },
-      "outbound": { "mode": "webhook" },
-      "control": { "allowUserId": "" }
+      "outbound": {
+        "mode": "webhook"
+      },
+      "control": {
+        "allowUserId": ""
+      }
     }
   },
-
   "quiet": false
 }

@@ -24,7 +24,6 @@ export interface PlatformConfig {
 	enabled: boolean;
 	quiet: boolean;
 	notify: {
-		onlyWhenTakenOver: boolean;
 		turnEnd: { enabled: boolean; minDurationMs: number };
 		sessionStop: boolean;
 		sessionShutdown: boolean;
@@ -73,11 +72,12 @@ export interface NotifyOptions {
 	/** Approvals and errors go out even while muted. */
 	bypassQuiet?: boolean;
 	/**
-	 * Send even when `notify.onlyWhenTakenOver` would suppress it.
+	 * Send even when this session has not taken the channel over.
 	 *
-	 * Reserved for one case: telling you that a takeover you were actively using
-	 * has just been stolen by another session. Staying silent there would leave
-	 * you believing the channel still drives this session.
+	 * Reserved for explicit requests and for telling you that a takeover you
+	 * were actively using has just been stolen by another session. Staying
+	 * silent there would leave you believing the channel still drives this
+	 * session.
 	 */
 	bypassTakeover?: boolean;
 	/** Request-specific lifetime, e.g. a question that has not been answered. */

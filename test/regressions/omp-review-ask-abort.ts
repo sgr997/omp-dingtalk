@@ -2,7 +2,7 @@ import { registerAskTool } from '../../src/core/ask-tool.ts';
 import { Bridge } from '../../src/core/bridge.ts';
 let tool:any; const schema=():any=>{const s:any={describe:()=>s,optional:()=>s,min:()=>s};return s};
 const zod:any=Object.fromEntries(['object','array','string','number','boolean'].map(n=>[n,()=>schema()]));
-const cfg:any={enabled:true,quiet:false,question:{enabled:true,timeoutMs:600000},control:{enabled:true},stream:{enabled:false,clientId:''},notify:{onlyWhenTakenOver:false,maxTextChars:1800}};
+const cfg:any={enabled:true,quiet:false,question:{enabled:true,timeoutMs:600000},control:{enabled:true},stream:{enabled:false,clientId:''},notify:{maxTextChars:1800}};
 const sender:any={configured:true,stats:{},enqueue(){},updateConfig(){}};
 const adapter:any={loadConfig:()=>({config:cfg,sources:[],warnings:[]}),resolveRobot:(c:any)=>c,createSender:()=>sender,createRouter:()=>({handle(){}}),formatter:{questionRequest:()=>({title:'Q',text:'Q'}),questionAnsweredLocally:()=>({title:'Q',text:'Q'})}};
 const bridge=new Bridge({sendUserMessage(){}},'/tmp',adapter); bridge.takenOver=true;

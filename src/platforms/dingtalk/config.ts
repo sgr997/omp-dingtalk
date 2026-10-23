@@ -72,19 +72,6 @@ export interface NotifyConfig {
 	atAll: boolean;
 	/** Hard cap on the length of a single notification body. */
 	maxTextChars: number;
-	/**
-	 * Suppress *every* notification until DingTalk has taken this session over.
-	 *
-	 * The natural companion to manual takeover: nothing arrives while you are
-	 * sitting at the terminal, and notifications begin the moment you run
-	 * `/dingtalk takeover` — then stop again on `/dingtalk release`.
-	 *
-	 * This is deliberately all-or-nothing. Startup, idle, approval, error and
-	 * shutdown alerts are all dropped while the session is not taken over, which
-	 * includes "the model credential was disabled". `/dingtalk test` and
-	 * `bun run doctor` still send, because those are explicit requests.
-	 */
-	onlyWhenTakenOver: boolean;
 }
 
 export interface ApprovalRule {
@@ -257,7 +244,6 @@ const DEFAULTS: DingTalkConfig = {
 		atUserIds: [],
 		atAll: false,
 		maxTextChars: 1800,
-		onlyWhenTakenOver: false,
 	},
 	approval: {
 		mode: "off",
@@ -534,7 +520,6 @@ export function loadConfig(cwd: string): LoadedConfig {
 		warnings.push("question.timeoutMs 无效，已回退为 600000（10 分钟）。");
 		config.question.timeoutMs = 600_000;
 	}
-	config.notify.onlyWhenTakenOver = config.notify.onlyWhenTakenOver === true;
 	// A typo in `approval.mode` must not silently disable the approval gate —
 	// same treatment as scope / outbound.mode.
 	const rawApprovalMode = config.approval.mode as unknown;
@@ -553,11 +538,12 @@ export function loadConfig(cwd: string): LoadedConfig {
 		resolveRobotConfig(config, name, warnings);
 	}
 
-	// "Silent until takeover" plus a takeover that can never happen is permanently silent —
-	// the worst possible failure mode, because it looks like nothing is wrong.
-	if (config.notify.onlyWhenTakenOver && !(config.enabled && config.control.enabled && config.stream.enabled)) {
+	// Notifications only go out while this session holds the channel, so a
+	// takeover that can never happen means permanent silence — the worst
+	// failure mode, because everything else looks healthy.
+	if (!(config.enabled && config.control.enabled && config.stream.enabled)) {
 		warnings.push(
-			"notify.onlyWhenTakenOver 为 true，但当前无法接管" +
+			"通知只在接管后发送，但当前无法接管" +
 				"（需要 enabled / control.enabled / stream.enabled 同时为 true 且 stream 凭据齐全）：" +
 				"这样一条通知也不会有。",
 		);
@@ -592,7 +578,6 @@ export function describeConfig(loaded: LoadedConfig): string[] {
 	`远程提问: ${config.question.enabled ? `已启用（超时 ${Math.round(config.question.timeoutMs / 1000)}s）` : "已关闭"}`,
 		`指令白名单: ${config.control.allowUserId || "(空 — 拒绝所有指令)"}`,
 		`静音: ${config.quiet ? "是" : "否"}`,
-		`接管前静默: ${config.notify.onlyWhenTakenOver ? "是（接管后才开始发通知）" : "否"}`,
 		`配置来源: ${loaded.sources.length ? loaded.sources.join(" | ") : "(全部使用默认值)"}`,
 	];
 }
