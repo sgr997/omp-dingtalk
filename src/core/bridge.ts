@@ -40,8 +40,40 @@ export class Bridge<P extends PlatformConfig> {
 	router: ChannelRouter;
 
 	quiet: boolean;
+	/** Start a fresh token count for the run that is about to begin. */
+	resetTurnUsage(): void {
+		this.#turnUsage = { model: "", total: 0 };
+	}
+
+	/**
+	 * Fold one assistant message's usage into the current run.
+	 *
+	 * A run can call the model several times (tool loop), so this accumulates
+	 * rather than replaces. `totalTokens` is provider-reported and includes
+	 * cache reads; fall back to input+output for providers that omit it.
+	 */
+	addTurnUsage(message: unknown, fallbackModel?: string): void {
+		const m = message as
+			| { role?: string; model?: string; usage?: { totalTokens?: number; input?: number; output?: number } }
+			| undefined;
+		const total = Number(m?.usage?.totalTokens ?? 0) || Number(m?.usage?.input ?? 0) + Number(m?.usage?.output ?? 0);
+		if (m?.model) this.#turnUsage.model = m.model;
+		else if (!this.#turnUsage.model && fallbackModel) this.#turnUsage.model = fallbackModel;
+		if (Number.isFinite(total) && total > 0) this.#turnUsage.total += total;
+	}
+
+	/** `deepseek-v4-flash · 12.3k tok`, or "" before anything was reported. */
+	get usageLabel(): string {
+		const { model, total } = this.#turnUsage;
+		if (!model && !total) return "";
+		const tokens = total >= 1000 ? `${(total / 1000).toFixed(1)}k tok` : `${total} tok`;
+		return model ? `${model} · ${tokens}` : tokens;
+	}
+
 	/** Short label of this omp session, prefixed to every pushed title. */
 	sessionTag = "";
+	/** Model and token burn accumulated since the current run started. */
+	#turnUsage = { model: "", total: 0 };
 	/** Explicit release suppresses new pushes until a successful local takeover. */
 	notificationsReleased = false;
 	/**
@@ -297,6 +329,7 @@ export class Bridge<P extends PlatformConfig> {
 		// The sender decorates command replies from the platform formatter's tag;
 		// keep it in step with the bridge's own copy.
 		this.formatter.setSessionTag?.(this.sessionTag);
+		this.formatter.setUsageLabel?.(this.usageLabel);
 		const badged = this.sessionTag ? `[${this.sessionTag}] ${message.title}` : message.title;
 		// The sender appends a footer (session label + time) to every delivered
 		// message, so the chunk budget has to leave room for it or a full-size

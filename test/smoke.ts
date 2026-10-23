@@ -890,11 +890,35 @@ console.log("\n[12] 会话事件 → 通知");
 	await fire("turn_end", {
 		type: "turn_end",
 		turnIndex: 1,
-		message: { role: "assistant", content: [{ type: "text", text: "已修好登录接口" }, { type: "toolCall", name: "edit" }] },
+		message: {
+			role: "assistant",
+			model: "deepseek-v4-flash",
+			usage: { totalTokens: 12345 },
+			content: [{ type: "text", text: "已修好登录接口" }, { type: "toolCall", name: "edit" }],
+		},
 		toolResults: [],
 	});
 	check("turn_end 触发通知", await waitFor(() => webhookPosts().length > before));
 	check("通知里包含最后回复", String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("已修好登录接口"));
+	check(
+		"落款带模型和本轮 token",
+		String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("deepseek-v4-flash · 12.3k tok"),
+		String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").slice(-90),
+	);
+
+	// A new user prompt starts a new run: the counter must reset, not carry the
+	// previous run's burn into the next footer.
+	await fire("agent_start", { type: "agent_start" });
+	await fire("turn_end", {
+		type: "turn_end",
+		turnIndex: 2,
+		message: { role: "assistant", model: "deepseek-v4-flash", usage: { totalTokens: 500 }, content: [{ type: "text", text: "第二轮" }] },
+		toolResults: [],
+	});
+	check(
+		"agent_start 重置 token 统计",
+		await waitFor(() => String(webhookPosts().at(-1)?.body?.markdown?.text ?? "").includes("deepseek-v4-flash · 500 tok")),
+	);
 
 	// Two sessions sharing one DingTalk account must still be tellable apart, so
 	// every notification carries `目录名·随机短码`; and every webhook post is

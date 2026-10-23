@@ -49,7 +49,13 @@ export function decorateMessage(message: Message): Message {
 	if (!tag) return message;
 	const prefix = `[${tag}] `;
 	const title = message.title.startsWith(prefix) ? message.title : `${prefix}${message.title}`;
-	const text = message.text.includes(`omp · ${tag} ·`) ? message.text : `${message.text}${footer()}`;
+	// Formatters bake a footer into the text before the bridge knows this run's
+	// token count, so rewrite the existing footer with the freshest label
+	// instead of leaving the stale one in place.
+	const existing = /\n\n---\n<font color="#999999" size="1">omp · [^<]*<\/font>\s*$/;
+	const text = existing.test(message.text)
+		? message.text.replace(existing, footer())
+		: `${message.text}${footer()}`;
 	return { title, text };
 }
 
@@ -58,13 +64,23 @@ export function getSessionTag(): string {
 	return sessionTag;
 }
 
+let usageLabel = "";
+
+/** `deepseek-v4-flash · 12.3k tok`, or "" when the host reported nothing. */
+export function setUsageLabel(label: string): void {
+	usageLabel = label;
+}
+
 function footer(): string {
 	// The title badge is only shown in the conversation list / notification;
 	// DingTalk does not render a markdown title inside the chat itself. Repeat
 	// the session label here so opening the conversation still tells you which
 	// omp window sent it.
-	const label = sessionTag ? `omp · ${sessionTag} · ${stamp()}` : `omp · ${stamp()}`;
-	return `\n\n---\n<font color="#999999" size="1">${label}</font>`;
+	const parts = ["omp"];
+	if (sessionTag) parts.push(sessionTag);
+	if (usageLabel) parts.push(usageLabel);
+	parts.push(stamp());
+	return `\n\n---\n<font color="#999999" size="1">${parts.join(" · ")}</font>`;
 }
 
 /** One-line "where did this come from", for messages that carry no footer. */

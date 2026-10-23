@@ -330,6 +330,17 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 	);
 
 	pi.on(
+		"agent_start",
+		safe("agent_start", async (_event, ctx) => {
+			const b = ensure(ctx?.cwd ?? process.cwd());
+			b.ctx = ctx;
+			// A new user prompt starts a new run: token totals are per run, not
+			// per session, so yesterday's burn does not leak into today's footer.
+			b.resetTurnUsage();
+		}),
+	);
+
+	pi.on(
 		"turn_start",
 		safe("turn_start", async (event, ctx) => {
 			const b = ensure(ctx?.cwd ?? process.cwd());
@@ -350,6 +361,8 @@ export default function ompDingTalk(pi: ExtensionAPI): void {
 			const b = ensure(ctx?.cwd ?? process.cwd());
 			b.ctx = ctx;
 			b.setLastAssistant(event?.message);
+			// Fold this call's token usage into the run total shown in the footer.
+			b.addTurnUsage(event?.message, ctx?.getModel?.()?.id);
 
 			const turnIndex = Number(event?.turnIndex ?? 0);
 			const startedAt = b.turnStartedAt.get(turnIndex) ?? b.runStartedAt;
