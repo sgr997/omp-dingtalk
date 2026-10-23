@@ -52,7 +52,7 @@ export function decorateMessage(message: Message): Message {
 	// Formatters bake a footer into the text before the bridge knows this run's
 	// token count, so rewrite the existing footer with the freshest label
 	// instead of leaving the stale one in place.
-	const existing = /\n\n<font color="#999999" size="1">[^<]*<\/font>\s*$/;
+	const existing = /\n\n---\n<font color="#999999" size="1">[^<]*<\/font>\s*$/;
 	const text = existing.test(message.text)
 		? message.text.replace(existing, footer())
 		: `${message.text}${footer()}`;
@@ -87,7 +87,7 @@ function footer(): string {
 	if (usageLabel) parts.push(usageLabel);
 	if (contextLabel) parts.push(contextLabel);
 	parts.push(stamp());
-	return `\n\n<font color="#999999" size="1">${parts.join(" · ")}</font>`;
+	return `\n\n---\n<font color="#999999" size="1">${parts.join(" · ")}</font>`;
 }
 
 /** One-line "where did this come from", for messages that carry no footer. */
