@@ -45,7 +45,8 @@
 - 远程控制使用 `control.scope: "direct"`、`control.autoTakeover: false`。只有用户明确要求每个新会话自动接管时才设为 `true`。
 - `control.allowUserId` 留空时，除 `/id` 外所有入站指令都会被拒绝。远程控制的初始配置可暂时留空，取得 `/id` 返回的 `senderStaffId` 后必须回填；单聊通知不能在收件人 ID 为空时算配置完成。
 - `/id`（`/whoami`）只有在 Stream 已启用、会话已 `/dingtalk takeover`、且消息符合 `control.scope` 时才能收到。纯 webhook 或 Stream 关闭时不能用它取 ID。
-- 接管会话是钉钉的唯一出口：一旦有会话接管，通知、审批、提问澄清都只从那个会话发；旁观会话保持静默。接管状态跨会话保留，只有被其他会话抢占或执行 `/dingtalk release` 才解除。
+- 接管会话是钉钉的唯一出口（前提是配置能接管）：一旦有会话接管，通知、审批、提问澄清都只从那个会话发；旁观会话保持静默。接管状态跨会话保留，只有被其他会话抢占或执行 `/dingtalk release` 才解除。
+- 通知策略与接管状态绑定：能接管（`stream.enabled` 且 `control.enabled` 且凭据齐全）时，未接管的会话一律不推送；纯出站配置（`stream.enabled: false`）没有接管这一步，通知照常发送。
 
 ---
 
@@ -171,7 +172,7 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 - 命名机器人只写自己不同的字段，其余继承全局设置；机器人名不能叫 `default`。
 - 切换：`/dingtalk takeover <机器人名>`，不带名字 = `default`。`/dingtalk release` 解除接管、回到 `default` 并停止本会话自动推送；再次成功 takeover 后恢复。 主动释放已接管的会话时，会向刚释放的机器人发送一条「钉钉已解除接管」确认；重复 release 不重复发送。确认走原发送队列，释放立即生效；发送失败会在终端提示，不会恢复接管或自动推送。
 - 锁按 `stream.clientId` 隔离：会话 A 接管 `home`、会话 B 接管 `work` 互不冲突，可以同时远程控制；两个会话抢同一个机器人，后来者赢。
-- 通知、审批、提问澄清都从**当前接管的机器人**发，且只在接管期间发：未接管的会话一律静默。显式 release 后保持停止；恢复同一会话或取消静音不会重新推送。查询时以 status 首行的当前会话状态、实际入站连接和自动推送状态为准，Stream 配置启用只代表允许连接。
+- 通知、审批、提问澄清都从**当前接管的机器人**发；配置能接管时只在接管期间发，未接管的会话一律静默。纯出站配置（`stream.enabled: false`）不等接管，直接发。显式 release 后保持停止；恢复同一会话或取消静音不会重新推送。查询时以 status 首行的当前会话状态、实际入站连接和自动推送状态为准，Stream 配置启用只代表允许连接。
 - `control.allowUserId` 可以每个机器人不同，把不同机器人交给不同人管。
 
 ---
@@ -211,13 +212,13 @@ cp config.example.json ~/.omp/dingtalk.json && chmod 600 ~/.omp/dingtalk.json
 
 | 现象 | 判断 / 做法 |
 | --- | --- |
-| 一条通知都没有 | 先 `bun run doctor`。若 doctor 全绿 → 多半是还没 `/dingtalk takeover`（通知只在接管期间发，设计行为，不是故障） |
+| 一条通知都没有 | 先 `bun run doctor`。若 doctor 全绿 → 配了 Stream 却没 `/dingtalk takeover`（能接管时通知只在接管期间发，设计行为，不是故障）；纯出站配置不受影响。`stream.enabled: true` 但 `control.enabled: false` 时配置加载会告警 |
 | 设了 direct 却单聊收不到 | ① `stream.robotCode` 填没填 ② `control.allowUserId` 是否为空 ③ 应用有没有**机器人发送消息**权限、收件人在不在可见范围 |
 | 通知发到了群里（想要私聊） | `outbound.mode` 没改成 `direct`。自定义机器人只能发群 |
 | 群里 @ 机器人没反应 | 默认 `scope: "direct"` 就是不理群聊。要群聊得改 `group`/`all` |
 | 钉钉发消息没反应 | ① `stream.enabled` 是否 true ② 有没有 `/dingtalk takeover` ③ 群聊是否 @ 了 ④ 应用有没有**发布** ⑤ `bun run watch` 发一条看帧 |
 | 每个新会话都要重新 takeover | 旧版本的「接管不跨会话继承」已废弃。接管现在是显式状态：`/dingtalk takeover` 后跨会话保留，新会话启动不会松开，只有被别的会话抢占或 `/dingtalk release` 才解除 |
-| 开了两个窗口，B 也会推通知 | 通知只在接管期间发。如果 B 没接管却在推，先看 A 的接管是否已经失效（进程退出、心跳超时、工作目录变更都会释放锁）；正常情况下别的会话完全静默（含 `/dingtalk test`）。想让 B 推，就在 B 里 `/dingtalk takeover`（会抢走 A） |
+| 开了两个窗口，B 也会推通知 | 能接管时通知只在接管期间发。如果 B 没接管却在推，先确认 B 是不是纯出站配置（`stream.enabled: false`，那种情况本来就照发）；再看 A 的接管是否已失效（进程退出、心跳超时、工作目录变更都会释放锁）。想让 B 推，就在 B 里 `/dingtalk takeover`（会抢走 A） |
 | 子代理退出/重试被推送、退出去还像主会话退出 | 已修复。宿主按会话重建扩展工厂：主会话一份插件副本，子代理在**自己的 cwd** 里再绑一份，各自持有独立 `bridge`——只靠 session id 门控挡不住这类泄漏（那是同一副本内的比较）。现在归属是**进程级**的：第一个见到 session id 的绑定拥有插件，其余绑定（子代理）完全静默：不建桥、不推送、不连 Stream。同一副本内带不同 session id 的事件按会话身份区分：子代理是无 UI 的 headless 会话（`hasUI === false`、`mode === "print"`），其事件照旧忽略；**顶层**的第二个会话（切会话/新建/恢复，`hasUI === true` 且 `mode === "tui"`，两个条件都要）会让桥改随新会话，`/dingtalk takeover` 成功也会把桥重绑到接管会话，`autoTakeover:true` 时新会话「后来者覆盖」直接接管——否则会出现「接管成功、锁和 Stream 都正常，却一条都不推」。**例外**：无 UI 的顶层会话（`omp -p`/ACP/SDK 等 `rpc`/`json`/`print` 模式）与子代理在宿主暴露的字段上不可区分，不会自动改绑，须显式 `/dingtalk takeover`；`/dingtalk status` 展示桥绑定会话 id，与被问会话不一致时给出显式提示，被归属过滤丢弃的事件另统计为丢弃计数（丢弃日志保持 debug 级，避免子代理常规流量刷屏）。若再出现，先确认跑的是新版插件（旧 omp 会话要退出重开才载入新代码） |
 | 终端提示「接管已被另一个会话抢占」 | 另一个会话在同一钉钉应用上 takeover 了。本会话已自动释放、Stream 已关闭，**不再往钉钉推任何卡**（钉钉只有一个出口）。想抢回就在本会话再 takeover；不想被抢就给每个会话配不同的 `stream.clientId`（或多机器人模式各自接管不同机器人，见 §4.2） |
 | 想多窗口同时远程控制 | 多机器人模式：每个机器人一把独立的锁（按 `stream.clientId` 隔离），会话 A 接管 A 机器人、会话 B 接管 B 机器人即可并存；抢同一个机器人仍是后来者赢（见 §4.2） |

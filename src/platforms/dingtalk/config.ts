@@ -538,14 +538,14 @@ export function loadConfig(cwd: string): LoadedConfig {
 		resolveRobotConfig(config, name, warnings);
 	}
 
-	// Notifications only go out while this session holds the channel, so a
-	// takeover that can never happen means permanent silence — the worst
-	// failure mode, because everything else looks healthy.
-	if (!(config.enabled && config.control.enabled && config.stream.enabled)) {
+	// Notifications follow takeover only when a takeover is actually possible.
+	// A config with a live inbound channel but `control.enabled: false` looks
+	// like "wait for takeover" to the user while the plugin notifies directly —
+	// say so, because the difference is invisible otherwise.
+	if (config.enabled && config.stream.enabled && !config.control.enabled) {
 		warnings.push(
-			"通知只在接管后发送，但当前无法接管" +
-				"（需要 enabled / control.enabled / stream.enabled 同时为 true 且 stream 凭据齐全）：" +
-				"这样一条通知也不会有。",
+			"stream.enabled 为 true 但 control.enabled 为 false：无法接管，" +
+				"通知会按纯出站模式直接发送，不会等待 `/dingtalk takeover`。",
 		);
 	}
 

@@ -1459,16 +1459,53 @@ console.log("\n[23] 未接管时完全静默（通知跟随接管）");
 	process.env.OMP_DINGTALK_CONFIG = previous;
 }
 
-console.log("\n[24] 无法接管 → 通知永远发不出去，必须告警");
+console.log("\n[23.1] 纯出站配置（无法接管）不等接管，照常推送");
 {
-	// The worst failure mode is silent-forever: it looks like nothing is wrong.
+	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-outbound-only-"));
+	const pureConfig = join(dir, "dingtalk.json");
+	writeFileSync(
+		pureConfig,
+		JSON.stringify({
+			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=PUREOUTTOKEN", secret: "" },
+			stream: { enabled: false },
+			notify: { turnEnd: { enabled: true, minDurationMs: 0 }, sessionStop: true },
+			control: { enabled: false },
+		}),
+	);
+	const previous = process.env.OMP_DINGTALK_CONFIG;
+	process.env.OMP_DINGTALK_CONFIG = pureConfig;
+
+	const module = await import(`../src/index.ts?pure=${Date.now()}`);
+	const handlers = new Map<string, Handler[]>();
+	const purePi: any = { ...pi, on: (e: string, h: Handler) => handlers.set(e, [...(handlers.get(e) ?? []), h]) };
+	module.default(purePi);
+
+	await tick(200);
+	const baseline = groupPosts().length;
+	await handlers.get("session_stop")![0](
+		{
+			type: "session_stop",
+			last_assistant_message: { role: "assistant", content: [{ type: "text", text: "干完了" }] },
+		},
+		ctx,
+	);
+	check("纯出站模式不等接管，直接推送", await waitFor(() => groupPosts().length > baseline), groupPosts().length - baseline);
+
+	process.env.OMP_DINGTALK_CONFIG = previous;
+}
+
+console.log("\n[24] 无法接管时通知不等待接管，配置要说清楚");
+{
 	const dir = mkdtempSync(join(tmpdir(), "omp-dingtalk-silent-dead-"));
 	const deadConfig = join(dir, "dingtalk.json");
+	// An inbound channel exists but control is off: the user may expect
+	// "wait for takeover" while the plugin notifies directly.
 	writeFileSync(
 		deadConfig,
 		JSON.stringify({
 			webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEADTOKEN" },
-			stream: { enabled: false },
+			stream: { enabled: true, clientId: "dead-client", clientSecret: "dead-secret" },
+			control: { enabled: false },
 		}),
 	);
 	const previous = process.env.OMP_DINGTALK_CONFIG;
@@ -1478,9 +1515,23 @@ console.log("\n[24] 无法接管 → 通知永远发不出去，必须告警");
 	process.env.OMP_DINGTALK_CONFIG = previous;
 
 	check(
-		"配置会明确告警「一条通知也不会有」",
-		loaded.warnings.some((w: string) => w.includes("通知只在接管后发送") && w.includes("一条通知也不会有")),
+		"stream 开着但控制关着 → 告警说明通知不会等待接管",
+		loaded.warnings.some((w: string) => w.includes("control.enabled 为 false") && w.includes("不会等待")),
 		loaded.warnings,
+	);
+
+	// A pure outbound config is a supported setup, not a silent dead end.
+	writeFileSync(
+		deadConfig,
+		JSON.stringify({ webhook: { url: "https://oapi.dingtalk.com/robot/send?access_token=DEADTOKEN" }, stream: { enabled: false } }),
+	);
+	process.env.OMP_DINGTALK_CONFIG = deadConfig;
+	const pure = loadConfig(dir);
+	process.env.OMP_DINGTALK_CONFIG = previous;
+	check(
+		"纯出站配置不会被警告成「一条通知也不会有」",
+		!pure.warnings.some((w: string) => w.includes("一条通知也不会有")),
+		pure.warnings,
 	);
 }
 

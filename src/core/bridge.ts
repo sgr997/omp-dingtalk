@@ -172,7 +172,7 @@ export class Bridge<P extends PlatformConfig> {
 		return () => generation === this.#generation && this.cfg.enabled &&
 			(!this.notificationsReleased || options.bypassTakeover === true) &&
 			(!this.takenOver || this.lock?.isOwner() === true) && !this.channelHeldByOther &&
-			(options.bypassTakeover === true || this.takenOver);
+			(options.bypassTakeover === true || !this.takeoverPossible || this.takenOver);
 	}
 
 	#invalidate(reason: string, preserveReleaseReceipt = false): void {
@@ -263,7 +263,10 @@ export class Bridge<P extends PlatformConfig> {
 		// happen in that state anyway (the gate stands down), and a bystander
 		// session pushing into the same conversation is noise the user cannot
 		// attribute.
-		if (!this.takenOver && !options.bypassTakeover) {
+		// A config that can take over follows the takeover state: no control, no
+		// push. A pure outbound config (no inbound channel) has no takeover to
+		// wait for, so it keeps notifying.
+		if (this.takeoverPossible && !this.takenOver && !options.bypassTakeover) {
 			this.log.debug("本会话未接管通道，跳过通知", { title: message.title });
 			return;
 		}
@@ -303,7 +306,7 @@ export class Bridge<P extends PlatformConfig> {
 	get canPush(): boolean {
 		if (!this.cfg.enabled) return false;
 		if (this.notificationsReleased) return false;
-		if (!this.takenOver) return false;
+		if (this.takeoverPossible && !this.takenOver) return false;
 		if (this.channelHeldByOther) return false;
 		if (this.takenOver && !this.lock?.isOwner()) return false;
 		return this.sender.configured;
@@ -316,7 +319,7 @@ export class Bridge<P extends PlatformConfig> {
 		if (this.channelHeldByOther) {
 			return "通道正被另一个 omp 会话接管，只有接管中的会话会推送。要在本会话推送，先执行 `/dingtalk takeover`。";
 		}
-		if (!this.takenOver) {
+		if (this.takeoverPossible && !this.takenOver) {
 			return "本会话未接管钉钉通道，需要先在 omp 里执行 `/dingtalk takeover`。";
 		}
 		if (this.takenOver && !this.lock?.isOwner()) return "接管锁已失效，请重新执行 `/dingtalk takeover`。";
@@ -340,6 +343,23 @@ export class Bridge<P extends PlatformConfig> {
 		// matches the active robot's credential.
 		if (this.lock && this.#lockClientId === clientId) return this.lock;
 		return new TakeoverLock(clientId, this.log);
+	}
+
+	/**
+	 * Whether this config could take the channel over at all.
+	 *
+	 * A pure outbound config (`stream.enabled: false`, or no stream credentials)
+	 * has no inbound channel, so it never reaches `takenOver`; its notifications
+	 * must not wait for a takeover that cannot happen.
+	 */
+	get takeoverPossible(): boolean {
+		return Boolean(
+			this.cfg.enabled &&
+				this.cfg.control.enabled &&
+				this.cfg.stream.enabled &&
+				this.cfg.stream.clientId &&
+				this.cfg.stream.clientSecret,
+		);
 	}
 
 	/** Another live session holds this app's channel; this session is a bystander. */

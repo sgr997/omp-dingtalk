@@ -37,8 +37,12 @@ export interface PlatformConfig {
 	approval: { mode: "off" | "remote"; timeoutMs: number; onTimeout: "deny" | "allow"; rules: ApprovalRule[] };
 	question: { enabled: boolean; timeoutMs: number };
 	control: { enabled: boolean; autoTakeover: boolean; scope: string; allowUserId?: string };
-	/** Inbound-channel identity: the cross-process lock is keyed on `clientId`. */
-	stream: { enabled: boolean; clientId: string };
+	/**
+	 * Inbound-channel identity: the cross-process lock is keyed on `clientId`.
+	 * `clientSecret` lets core tell a config that *can* take over from a pure
+	 * outbound config that has no inbound channel at all.
+	 */
+	stream: { enabled: boolean; clientId: string; clientSecret?: string };
 	/** Outbound-channel identity (shown in status). Platform-specific shape. */
 	outbound?: { mode: string };
 }
