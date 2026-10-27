@@ -48,7 +48,7 @@
     "atMobiles": [],
     "atUserIds": [],
     "atAll": false,
-    "maxTextChars": 1800
+    "maxTextChars": 10000
   },
   "approval": {
     "$comment": "远程审批闸门。off = 只通知不拦截；remote = 命中规则的敏感操作会挂起，等你在钉钉里回「同意/拒绝」。",

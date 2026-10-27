@@ -243,7 +243,7 @@ const DEFAULTS: DingTalkConfig = {
 		atMobiles: [],
 		atUserIds: [],
 		atAll: false,
-		maxTextChars: 1800,
+		maxTextChars: 10000,
 	},
 	approval: {
 		mode: "off",
