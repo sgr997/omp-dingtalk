@@ -6,6 +6,7 @@
  */
 import type { ApprovalRule } from "./config";
 import { fenceSafe, humanDuration, truncate, truncatePath } from "../../core/util";
+import { renderMermaidFlowcharts } from "./mermaid";
 
 export interface Message {
 	title: string;
@@ -45,18 +46,20 @@ export function setSessionTag(tag: string): void {
  * all end up here.
  */
 export function decorateMessage(message: Message): Message {
+	const renderedText = renderMermaidFlowcharts(message.text);
+	const normalized = renderedText === message.text ? message : { ...message, text: renderedText };
 	const tag = sessionTag;
-	if (!tag) return message;
+	if (!tag) return normalized;
 	const prefix = `[${tag}] `;
 	const title = message.title.startsWith(prefix) ? message.title : `${prefix}${message.title}`;
 	// Formatters bake a footer into the text before the bridge knows this run's
 	// token count, so rewrite the existing footer with the freshest label
 	// instead of leaving the stale one in place.
 	const existing = /\n\n---\n<font color="#999999" size="1">[^<]*<\/font>\s*$/;
-	const text = existing.test(message.text)
-		? message.text.replace(existing, footer())
-		: `${message.text}${footer()}`;
-	return { title, text };
+	const text = existing.test(normalized.text)
+		? normalized.text.replace(existing, footer())
+		: `${normalized.text}${footer()}`;
+	return { ...normalized, title, text };
 }
 
 /** `目录名·a1b2`, or "" before a session has been labelled. */

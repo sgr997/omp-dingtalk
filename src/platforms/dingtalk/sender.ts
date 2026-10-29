@@ -23,6 +23,7 @@ import type { DingTalkConfig } from "./config";
 import type { Logger } from "../../core/logger";
 import { hmacSha256Base64, sleep } from "../../core/util";
 import { decorateMessage } from "./format";
+import { renderMermaidFlowcharts } from "./mermaid";
 
 export interface SendOptions {
 	title: string;
@@ -467,7 +468,7 @@ export class DingTalkSender {
 			const response = await fetch(sessionWebhook, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ msgtype: "markdown", markdown: { title, text } }),
+				body: JSON.stringify({ msgtype: "markdown", markdown: { title, text: renderMermaidFlowcharts(text) } }),
 				signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
 			});
 			const raw = await response.text();

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "bun run test:state && bun test/smoke.ts && bun test/verify-load.ts",
-    "test:state": "bun test test/state-regressions.test.ts test/lock-concurrency.test.ts test/lifecycle-boundaries.test.ts",
+    "test:state": "bun test test/state-regressions.test.ts test/lock-concurrency.test.ts test/lifecycle-boundaries.test.ts test/mermaid-render.test.ts",
     "test:smoke": "bun test/smoke.ts",
     "test:load": "bun test/verify-load.ts",
     "typecheck": "tsc --noEmit",
